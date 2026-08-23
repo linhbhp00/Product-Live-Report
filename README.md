@@ -12,7 +12,8 @@ streamlit run app.py
 ## Dữ liệu đầu vào
 
 - **Product Master:** export [TOTAL ASINs / All](https://everlastify.jp.larksuite.com/base/RXnkbQ0NXaPKanshOEfjtNwjp7k?table=tblgsIV71tjUvLlB&view=vewuAjvYoo) thành `.xlsx`/`.csv`, hoặc đồng bộ bằng API.
-- Mapping: `ASIN`, `AMZ SKU → SKU`, `Product Name`, `Product Type`, `Managed By/Owners → ASIN Manager`, `MRnD Idea → MRnD`, `Managed By`, `Custom By`, `Status`.
+- Mapping: `ASIN`, `Record ID`, `Image`, `AMZ SKU → SKU`, `Product Name`, `Product Type`, `Managed By/Owners → ASIN Manager`, `MRnD Idea → MRnD`, `Listing By`, `Custom By`, `Status`.
+- Cột `Image` được hiển thị trực tiếp trong bảng khi Product Master cung cấp URL ảnh (`http`, `https` hoặc data URI). File Excel chỉ chứa tên ảnh nhưng không kèm URL sẽ để trống ảnh để tránh biểu tượng lỗi.
 - **Order Report:** hỗ trợ trực tiếp file `.txt` tab-delimited của Amazon cùng `.tsv`, `.csv`, `.xlsx`, `.xls`.
 
 `Net Revenue = Item Price + Shipping Price - Item Promotion Discount - Ship Promotion Discount`. App tự loại đơn `Cancelled`.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import json
 import os
 import re
 
@@ -19,13 +20,15 @@ LARK_TABLE_ID = "tblgsIV71tjUvLlB"
 LARK_VIEW_ID = "vewuAjvYoo"
 
 MASTER_ALIASES = {
+    "record_id": ["record id", "record_id", "_record_id"],
+    "image": ["image", "image url", "image_url", "product image", "photo"],
     "asin": ["asin"],
     "sku": ["sku", "amz sku", "amz_sku"],
     "product_name": ["product name", "product", "title"],
     "product_type": ["product type", "type"],
     "asin_manager": ["owners", "asin manager", "product owner", "owner", "managed by", "manager"],
     "mrnd": ["mrnd idea", "mrnd", "is mrnd", "is_mrnd"],
-    "listing_by": ["managed by", "manage by", "listing by", "listing_by"],
+    "listing_by": ["listing by", "listing_by"],
     "custom_by": ["custom by", "custom_by"],
     "status": ["status"],
 }
@@ -49,10 +52,13 @@ def normalize_header(value: str) -> str:
 
 def standardize_columns(df: pd.DataFrame, aliases: dict[str, list[str]]) -> pd.DataFrame:
     normalized = {normalize_header(column): column for column in df.columns}
+    exact = {str(column).strip().lower(): column for column in df.columns}
     rename = {}
     for target, candidates in aliases.items():
         for candidate in candidates:
-            original = normalized.get(normalize_header(candidate))
+            original = exact.get(str(candidate).strip().lower())
+            if original is None:
+                original = normalized.get(normalize_header(candidate))
             if original is not None:
                 rename[original] = target
                 break
@@ -83,6 +89,8 @@ def clean_master(raw: pd.DataFrame) -> pd.DataFrame:
         if column not in df:
             df[column] = ""
     df["asin"] = df["asin"].fillna("").astype(str).str.strip().str.upper()
+    df["record_id"] = df["record_id"].fillna("").astype(str).str.strip()
+    df["image"] = df["image"].map(normalize_image_source)
     df = df[df["asin"].ne("")].drop_duplicates("asin", keep="last")
     mrnd_text = df["mrnd"].fillna("").astype(str).str.strip().str.lower()
     df["mrnd"] = ~mrnd_text.isin(["", "no", "false", "0", "none", "nan", "n"])
@@ -144,6 +152,43 @@ def flatten_lark_value(value):
     return "" if value is None else value
 
 
+def extract_lark_image(value) -> str:
+    """Prefer a browser-loadable URL from a Lark attachment value."""
+    if isinstance(value, list):
+        for item in value:
+            source = extract_lark_image(item)
+            if source:
+                return source
+        return ""
+    if isinstance(value, dict):
+        for key in ("url", "tmp_url", "link"):
+            source = normalize_image_source(value.get(key, ""))
+            if source:
+                return source
+        return ""
+    return normalize_image_source(value)
+
+
+def normalize_image_source(value) -> str:
+    """Return the first HTTP(S) or data-image source; ignore bare filenames."""
+    if value is None or (not isinstance(value, (list, dict)) and pd.isna(value)):
+        return ""
+    if isinstance(value, (list, dict)):
+        return extract_lark_image(value)
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.startswith("data:image/"):
+        return text
+    if text[:1] in "[{":
+        try:
+            return extract_lark_image(json.loads(text))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    match = re.search(r"https?://[^\s,;\]\)}]+", text)
+    return match.group(0).rstrip("'\"") if match else ""
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_lark_master(app_id: str, app_secret: str, app_token: str, table_id: str, view_id: str) -> pd.DataFrame:
     token_response = requests.post(
@@ -173,12 +218,22 @@ def fetch_lark_master(app_id: str, app_secret: str, app_token: str, table_id: st
         if payload.get("code") != 0:
             raise ValueError(payload.get("msg", "Không đọc được Lark Base."))
         data = payload.get("data", {})
-        records.extend(item.get("fields", {}) for item in data.get("items", []))
+        for item in data.get("items", []):
+            fields = dict(item.get("fields", {}))
+            fields.setdefault("Record ID", item.get("record_id", ""))
+            records.append(fields)
         if not data.get("has_more"):
             break
         page_token = data.get("page_token")
 
-    normalized = [{key: flatten_lark_value(value) for key, value in record.items()} for record in records]
+    normalized = [
+        {
+            key: extract_lark_image(value) if normalize_header(key) in {"image", "image url", "product image", "photo"}
+            else flatten_lark_value(value)
+            for key, value in record.items()
+        }
+        for record in records
+    ]
     return clean_master(pd.DataFrame(normalized))
 
 
@@ -313,7 +368,7 @@ with st.expander("↑  Import dữ liệu", expanded=False):
             type=["csv", "xlsx", "xls"],
             help="File export của bảng TOTAL ASINs / view All",
         )
-        st.caption("Cần: ASIN. Tự nhận AMZ SKU, Product Name, Product Type, Managed By, MRnD Idea, Listing By và Custom By.")
+        st.caption("Cần: ASIN. Tự nhận Record ID, Image, AMZ SKU, Product Name, Product Type, Managed By, MRnD Idea, Listing By và Custom By.")
     with right:
         order_upload = st.file_uploader(
             "Order Report",
@@ -447,15 +502,21 @@ with st.container(border=True):
         "Product Type": "product_type", "ASIN Manager": "asin_manager",
     }
     summary = summary.sort_values(sort_map[sort_column], ascending=direction == "Tăng dần", na_position="last")
-    display = summary[["product_name", "sku", "asin", "product_type", "asin_manager", "mrnd", "listing_by", "custom_by", "net_revenue", "orders", "qty"]].copy()
+    display = summary[["image", "record_id", "product_name", "sku", "asin", "product_type", "asin_manager", "mrnd", "listing_by", "custom_by", "net_revenue", "orders", "qty"]].copy()
     display["mrnd"] = display["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
-    display.columns = ["Product Name", "SKU", "ASIN", "Product Type", "ASIN Manager", "MRnD", "Managed By", "Custom By", "Net Revenue", "Orders", "Qty"]
+    display.columns = ["Image", "Record ID", "Product Name", "SKU", "ASIN", "Product Type", "ASIN Manager", "MRnD", "Listing By", "Custom By", "Net Revenue", "Orders", "Qty"]
     st.dataframe(
         display,
         use_container_width=True,
         hide_index=True,
         height=min(620, 48 + max(len(display), 5) * 36),
-        column_config={"Net Revenue": st.column_config.NumberColumn(format="$%.2f"), "Orders": st.column_config.NumberColumn(format="%d"), "Qty": st.column_config.NumberColumn(format="%.0f")},
+        column_config={
+            "Image": st.column_config.ImageColumn("Image", width="small"),
+            "Record ID": st.column_config.TextColumn("Record ID", width="medium"),
+            "Net Revenue": st.column_config.NumberColumn(format="$%.2f"),
+            "Orders": st.column_config.NumberColumn(format="%d"),
+            "Qty": st.column_config.NumberColumn(format="%.0f"),
+        },
     )
     mapped_count = int(orders["mapped"].sum())
     unmapped_count = int((~orders["mapped"]).sum())
@@ -467,7 +528,7 @@ with st.container(border=True):
 with st.expander("Data model & cohort roadmap"):
     st.markdown(
         """
-        **Product Master:** upload file export của bảng `TOTAL ASINs` / view `All`, hoặc đồng bộ API khi được cấp quyền. `Managed By → ASIN Manager`, `MRnD Idea → MRnD`.
+        **Product Master:** upload file export của bảng `TOTAL ASINs` / view `All`, hoặc đồng bộ API khi được cấp quyền. `Managed By → ASIN Manager`, `MRnD Idea → MRnD`; `Record ID`, `Image`, `Listing By` và `Custom By` lấy trực tiếp theo ASIN. Ảnh sẽ hiển thị khi trường `Image` chứa URL có thể truy cập.
 
         **Order Report:** chỉ lưu transaction theo ngày. `Net Revenue = Item Price + Shipping - Item Promotion - Shipping Promotion`; đơn `Cancelled` được loại.
         **Cohort D7/D14/D30:** thêm `Live Date` vào Product Master, tính tuổi listing từ `Order Date - Live Date`, rồi nhóm doanh thu theo ngày tuổi.
