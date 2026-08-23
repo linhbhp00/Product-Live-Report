@@ -362,7 +362,7 @@ st.markdown(
     div[data-testid="stVerticalBlockBorderWrapper"] { border:1px solid var(--line); border-radius:14px; background:white; box-shadow:0 10px 30px rgba(20,43,68,.055); }
     .section-title { color:var(--navy) !important; font:800 18px Manrope,sans-serif; margin:0; }
     .section-sub { color:var(--muted); font-size:12px; margin:4px 0 14px; }
-    .kpi-grid { display:grid; grid-template-columns:1.35fr repeat(3,1fr); gap:13px; margin:18px 0 22px; }
+    .kpi-side-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:13px; margin-top:31px; }
     .kpi-card {
         position:relative; overflow:hidden; min-height:122px; padding:18px 19px 16px; background:var(--paper);
         border:1px solid var(--line); border-radius:14px; box-shadow:0 7px 22px rgba(20,43,68,.06);
@@ -389,11 +389,11 @@ st.markdown(
     [data-testid="stAlert"] { background:var(--orange-soft) !important; color:var(--navy) !important; border-color:#f7c98f !important; }
     [data-testid="stAlert"] * { color:var(--navy) !important; opacity:1 !important; }
     hr { border-color:var(--line) !important; }
-    @media(max-width:980px){ .kpi-grid{grid-template-columns:repeat(2,1fr)} .kpi-card.primary{grid-column:auto} }
+    @media(max-width:980px){ .kpi-side-grid{grid-template-columns:repeat(2,1fr);margin-top:12px} .kpi-card.primary{grid-column:auto} }
     @media(max-width:700px){
         [data-testid="stAppViewContainer"] > .main .block-container{padding:1rem .75rem 3rem}
         .appbar{margin:-1rem -.75rem 1.2rem;padding:13px .9rem}.sync{display:none}.hero h1{font-size:28px}
-        .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:14px 0 18px}
+        .kpi-side-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:10px 0 4px}
         .kpi-card,.kpi-card.primary{grid-column:auto;min-height:106px;padding:15px 13px 13px}
         .kpi-card:last-child{grid-column:auto}.kpi-value{font-size:22px}.kpi-label{font-size:10px}
     }
@@ -509,60 +509,98 @@ summary = (
 total_asin = master_scope.loc[~master_scope["status"].astype(str).str.lower().eq("inactive"), "asin"].nunique()
 asin_sold = summary["asin"].nunique()
 
-st.markdown(
-    f"""
-    <div class="kpi-grid">
-      <div class="kpi-card primary">
-        <span class="kpi-label">Revenue</span>
-        <span class="kpi-value">{money(summary['net_revenue'].sum())}</span>
-        <span class="kpi-note">Item Price + Shipping Price</span>
-      </div>
-      <div class="kpi-card">
-        <span class="kpi-label">Orders</span>
-        <span class="kpi-value">{summary['orders'].sum():,.0f}</span>
-        <span class="kpi-note">Đơn hàng duy nhất</span>
-      </div>
-      <div class="kpi-card">
-        <span class="kpi-label">ASIN Sold</span>
-        <span class="kpi-value">{asin_sold:,}</span>
-        <span class="kpi-note">Có sale trong kỳ</span>
-      </div>
-      <div class="kpi-card">
-        <span class="kpi-label">Total ASIN</span>
-        <span class="kpi-value">{total_asin:,}</span>
-        <span class="kpi-note">ASIN đang hoạt động</span>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.write("")
 with st.container(border=True):
-    st.markdown('<p class="section-title">Revenue by MRnD & Store</p>', unsafe_allow_html=True)
-    st.markdown('<p class="section-sub">Vòng trong: MRnD / Non-MRnD · Vòng ngoài: chi tiết Store trong MRnD</p>', unsafe_allow_html=True)
     chart_data = summary[["mrnd", "store", "net_revenue"]].copy()
     chart_data["MRnD"] = chart_data["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
-    chart_data["Store detail"] = chart_data.apply(
-        lambda row: f"MRnD · {row['store'] or 'Chưa xác định'}" if row["mrnd"] else "Non-MRnD",
-        axis=1,
-    )
-    inner = chart_data.groupby("MRnD", as_index=False)["net_revenue"].sum()
-    outer = chart_data.groupby("Store detail", as_index=False)["net_revenue"].sum()
-    if chart_data["net_revenue"].sum() > 0:
-        inner_chart = alt.Chart(inner).mark_arc(innerRadius=48, outerRadius=92, stroke="white", strokeWidth=2).encode(
-            theta=alt.Theta("net_revenue:Q", stack=True),
-            color=alt.Color("MRnD:N", scale=alt.Scale(domain=["MRnD", "Non-MRnD"], range=["#f59a3d", "#27445f"]), title="Nhóm"),
-            tooltip=[alt.Tooltip("MRnD:N"), alt.Tooltip("net_revenue:Q", title="Revenue", format="$,.2f")],
+    chart_data["Store"] = chart_data["store"].replace("", "Chưa xác định")
+    total_revenue = chart_data["net_revenue"].sum()
+    chart_col, kpi_col = st.columns([1.18, 1], gap="large")
+
+    with chart_col:
+        st.markdown('<p class="section-title">Revenue by MRnD & Store</p>', unsafe_allow_html=True)
+        st.markdown('<p class="section-sub">Vòng ngoài: MRnD / Non-MRnD · Vòng trong: Wrappiness / Pawsionate của từng nhóm</p>', unsafe_allow_html=True)
+        if total_revenue > 0:
+            outer = chart_data.groupby("MRnD", as_index=False)["net_revenue"].sum()
+            outer["sort_order"] = outer["MRnD"].map({"MRnD": 0, "Non-MRnD": 1})
+            outer["percent"] = outer["net_revenue"] / total_revenue
+            outer["legend"] = outer.apply(lambda row: f"{row['MRnD']} · {row['percent']:.1%}", axis=1)
+            outer["arc_label"] = outer["percent"].map(lambda value: f"{value:.1%}" if value >= .025 else "")
+            outer = outer.sort_values("sort_order")
+
+            inner = chart_data.groupby(["MRnD", "Store"], as_index=False)["net_revenue"].sum()
+            inner["detail"] = inner["MRnD"] + " · " + inner["Store"]
+            detail_order = {
+                "MRnD · Wrappiness": 0, "MRnD · Pawsionate": 1,
+                "MRnD · Chưa xác định": 2, "Non-MRnD · Wrappiness": 3,
+                "Non-MRnD · Pawsionate": 4, "Non-MRnD · Chưa xác định": 5,
+            }
+            detail_colors = {
+                "MRnD · Wrappiness": "#e78024", "MRnD · Pawsionate": "#ffc477",
+                "MRnD · Chưa xác định": "#ffe0b2", "Non-MRnD · Wrappiness": "#1d3d5a",
+                "Non-MRnD · Pawsionate": "#5d82a3", "Non-MRnD · Chưa xác định": "#a9bfd2",
+            }
+            inner["sort_order"] = inner["detail"].map(detail_order).fillna(99)
+            inner["percent"] = inner["net_revenue"] / total_revenue
+            inner["legend"] = inner.apply(lambda row: f"{row['detail']} · {row['percent']:.1%}", axis=1)
+            inner["arc_label"] = inner["percent"].map(lambda value: f"{value:.1%}" if value >= .025 else "")
+            inner = inner.sort_values("sort_order")
+
+            outer_domain = outer["legend"].tolist()
+            outer_range = ["#f59a3d" if label.startswith("MRnD ·") else "#27445f" for label in outer_domain]
+            inner_domain = inner["legend"].tolist()
+            inner_range = [detail_colors.get(detail, "#9aa8b5") for detail in inner["detail"]]
+
+            outer_arc = alt.Chart(outer).mark_arc(innerRadius=104, outerRadius=142, stroke="white", strokeWidth=2).encode(
+                theta=alt.Theta("net_revenue:Q", stack=True),
+                order=alt.Order("sort_order:Q", sort="ascending"),
+                color=alt.Color("legend:N", scale=alt.Scale(domain=outer_domain, range=outer_range), title="MRnD / Non-MRnD"),
+                tooltip=[alt.Tooltip("MRnD:N"), alt.Tooltip("net_revenue:Q", title="Revenue", format="$,.2f"), alt.Tooltip("percent:Q", title="Tỷ trọng", format=".1%")],
+            )
+            outer_text = alt.Chart(outer).mark_text(radius=122, color="white", fontSize=12, fontWeight="bold").encode(
+                theta=alt.Theta("net_revenue:Q", stack=True), order=alt.Order("sort_order:Q", sort="ascending"), text="arc_label:N"
+            )
+            inner_arc = alt.Chart(inner).mark_arc(innerRadius=37, outerRadius=95, stroke="white", strokeWidth=2).encode(
+                theta=alt.Theta("net_revenue:Q", stack=True),
+                order=alt.Order("sort_order:Q", sort="ascending"),
+                color=alt.Color("legend:N", scale=alt.Scale(domain=inner_domain, range=inner_range), title="Store trong từng nhóm"),
+                tooltip=[alt.Tooltip("detail:N", title="Nhóm · Store"), alt.Tooltip("net_revenue:Q", title="Revenue", format="$,.2f"), alt.Tooltip("percent:Q", title="Tỷ trọng", format=".1%")],
+            )
+            inner_text = alt.Chart(inner).mark_text(radius=67, color="white", fontSize=11, fontWeight="bold").encode(
+                theta=alt.Theta("net_revenue:Q", stack=True), order=alt.Order("sort_order:Q", sort="ascending"), text="arc_label:N"
+            )
+            revenue_chart = (inner_arc + inner_text + outer_arc + outer_text).resolve_scale(color="independent").properties(height=390)
+            st.altair_chart(revenue_chart, use_container_width=True)
+        else:
+            st.info("Không có revenue trong bộ lọc hiện tại.")
+
+    with kpi_col:
+        st.markdown(
+            f"""
+            <div class="kpi-side-grid">
+              <div class="kpi-card primary">
+                <span class="kpi-label">Revenue</span>
+                <span class="kpi-value">{money(summary['net_revenue'].sum())}</span>
+                <span class="kpi-note">Item Price + Shipping Price</span>
+              </div>
+              <div class="kpi-card">
+                <span class="kpi-label">Orders</span>
+                <span class="kpi-value">{summary['orders'].sum():,.0f}</span>
+                <span class="kpi-note">Đơn hàng duy nhất</span>
+              </div>
+              <div class="kpi-card">
+                <span class="kpi-label">ASIN Sold</span>
+                <span class="kpi-value">{asin_sold:,}</span>
+                <span class="kpi-note">Có sale trong kỳ</span>
+              </div>
+              <div class="kpi-card">
+                <span class="kpi-label">Total ASIN</span>
+                <span class="kpi-value">{total_asin:,}</span>
+                <span class="kpi-note">ASIN đang hoạt động</span>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        outer_chart = alt.Chart(outer).mark_arc(innerRadius=101, outerRadius=137, stroke="white", strokeWidth=2).encode(
-            theta=alt.Theta("net_revenue:Q", stack=True),
-            color=alt.Color("Store detail:N", scale=alt.Scale(range=["#f59a3d", "#ffc477", "#ffdca9", "#27445f"]), title="MRnD theo Store"),
-            tooltip=[alt.Tooltip("Store detail:N"), alt.Tooltip("net_revenue:Q", title="Revenue", format="$,.2f")],
-        )
-        st.altair_chart((inner_chart + outer_chart).resolve_scale(color="independent").properties(height=350), use_container_width=True)
-    else:
-        st.info("Không có revenue trong bộ lọc hiện tại.")
 
 st.write("")
 with st.container(border=True):

@@ -18,7 +18,7 @@ streamlit run app.py
 
 `Purchase Time` được chuyển từ UTC sang `America/Los_Angeles`. `Revenue = Item Price + Shipping Price`. App tự loại `Cancelled/Canceled`, các order có `fulfillment-channel = Amazon` và ASIN có `Fulfill By = FBA`; chỉ giữ FBM.
 
-Dashboard có bộ lọc Store và biểu đồ donut Revenue theo MRnD/Non-MRnD; phần MRnD tách tiếp theo Wrappiness (`WR`) và Pawsionate (`PAW`).
+Dashboard có bộ lọc Store và biểu đồ donut hai tầng: vòng ngoài là MRnD/Non-MRnD, vòng trong chia Wrappiness (`WR`) và Pawsionate (`PAW`) trong từng nhóm. Tỷ trọng phần trăm xuất hiện trên lát đủ lớn, trong tooltip và trong chú giải. Bốn KPI Revenue, Orders, ASIN Sold và Total ASIN được bố trí 2×2 bên phải biểu đồ.
 
 ## Deploy trên Streamlit Community Cloud
 
