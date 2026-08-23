@@ -101,7 +101,7 @@ def clean_orders(raw: pd.DataFrame) -> pd.DataFrame:
             df[column] = 0 if column in {"qty", "item_price", "shipping", "promotion", "ship_promotion"} else ""
     df["asin"] = df["asin"].fillna("").astype(str).str.strip().str.upper()
     df["order_id"] = df["order_id"].fillna("").astype(str).str.strip()
-    df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+    df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce", utc=True).dt.tz_convert(None)
     for column in ["qty", "item_price", "shipping", "promotion", "ship_promotion"]:
         df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
     df["net_revenue"] = (
