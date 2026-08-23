@@ -25,7 +25,7 @@ MASTER_ALIASES = {
     "product_type": ["product type", "type"],
     "asin_manager": ["owners", "asin manager", "product owner", "owner", "managed by", "manager"],
     "mrnd": ["mrnd idea", "mrnd", "is mrnd", "is_mrnd"],
-    "listing_by": ["listing by", "listing_by"],
+    "listing_by": ["managed by", "manage by", "listing by", "listing_by"],
     "custom_by": ["custom by", "custom_by"],
     "status": ["status"],
 }
@@ -449,7 +449,7 @@ with st.container(border=True):
     summary = summary.sort_values(sort_map[sort_column], ascending=direction == "Tăng dần", na_position="last")
     display = summary[["product_name", "sku", "asin", "product_type", "asin_manager", "mrnd", "listing_by", "custom_by", "net_revenue", "orders", "qty"]].copy()
     display["mrnd"] = display["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
-    display.columns = ["Product Name", "SKU", "ASIN", "Product Type", "ASIN Manager", "MRnD", "Listing By", "Custom By", "Net Revenue", "Orders", "Qty"]
+    display.columns = ["Product Name", "SKU", "ASIN", "Product Type", "ASIN Manager", "MRnD", "Managed By", "Custom By", "Net Revenue", "Orders", "Qty"]
     st.dataframe(
         display,
         use_container_width=True,
