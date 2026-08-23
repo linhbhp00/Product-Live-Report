@@ -18,4 +18,4 @@ Hỗ trợ `.csv`, `.xlsx` và `.xls`. Promotion nên là số âm nếu là kho
 
 ## Deploy trên Streamlit Community Cloud
 
-Chọn repository này và đặt **Main file path** là `streamlit_app/app.py`.
+Chọn repository này và đặt **Main file path** là `app.py`.
