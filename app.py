@@ -233,34 +233,63 @@ st.markdown(
     """
     <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@700;800&display=swap');
-    :root { --deep:#143f32; --green:#1b6b50; --muted:#718078; --line:#e4eae6; --paper:#ffffff; }
-    .stApp { background:#f4f6f4; color:#17201d; font-family:'DM Sans',sans-serif; }
-    [data-testid="stHeader"] { background:transparent; }
-    [data-testid="stAppViewContainer"] > .main .block-container { max-width:1480px; padding:1.5rem 2.4rem 4rem; }
-    .appbar { background:var(--deep); color:white; margin:-1.5rem -2.4rem 2rem; padding:17px 2.4rem; display:flex; align-items:center; justify-content:space-between; }
-    .brand { display:flex; align-items:center; gap:11px; font-family:Manrope,sans-serif; font-weight:800; }
-    .brand-badge { display:grid; place-items:center; width:32px; height:32px; border-radius:9px; color:#143f32; background:#cde96d; }
-    .sync { font-size:12px; color:#cfddd8; } .sync b { color:#79d8a8; }
-    .hero { display:flex; justify-content:space-between; align-items:end; margin-bottom:1.3rem; }
-    .eyebrow { color:var(--green); font-size:11px; font-weight:700; letter-spacing:1.6px; }
-    .hero h1 { font:800 32px/1.2 Manrope,sans-serif; margin:7px 0 5px; letter-spacing:-1px; }
+    :root {
+        --navy:#142b44; --navy-2:#27445f; --orange:#f59a3d; --orange-soft:#fff0df;
+        --cream:#fffaf4; --canvas:#f7f4ef; --muted:#718090; --line:#eadfd3; --paper:#ffffff;
+    }
+    .stApp { background:var(--canvas); color:var(--navy); font-family:'DM Sans',sans-serif; }
+    [data-testid="stHeader"] { background:rgba(247,244,239,.92); }
+    [data-testid="stAppViewContainer"] > .main .block-container { max-width:1480px; padding:1.35rem 2.35rem 4rem; }
+    .appbar {
+        background:var(--paper); color:var(--navy); margin:-1.35rem -2.35rem 1.75rem; padding:15px 2.35rem;
+        display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line);
+        box-shadow:0 4px 20px rgba(20,43,68,.05);
+    }
+    .brand { display:flex; align-items:center; gap:12px; font-family:Manrope,sans-serif; font-weight:800; letter-spacing:-.2px; }
+    .brand-badge { display:grid; place-items:center; width:34px; height:34px; border-radius:10px; color:white; background:var(--orange); box-shadow:0 6px 14px rgba(245,154,61,.28); }
+    .sync { font-size:12px; color:var(--muted); } .sync b { color:var(--orange); }
+    .hero { display:flex; justify-content:space-between; align-items:end; margin-bottom:1.25rem; padding:4px 2px; }
+    .eyebrow { color:var(--orange); font-size:11px; font-weight:800; letter-spacing:1.8px; }
+    .hero h1 { color:var(--navy) !important; font:800 34px/1.15 Manrope,sans-serif; margin:7px 0 6px; letter-spacing:-1.2px; }
     .hero p { color:var(--muted); margin:0; font-size:14px; }
-    [data-testid="stMetric"] { background:white; border:1px solid var(--line); border-radius:10px; padding:15px 18px; min-height:112px; box-shadow:0 1px 2px rgba(20,45,36,.03); }
-    [data-testid="stMetricLabel"] { color:#68776f; font-size:12px; font-weight:600; }
-    [data-testid="stMetricValue"] { font-family:Manrope,sans-serif; font-size:25px; letter-spacing:-.7px; }
-    [data-testid="stMetricDelta"] { font-size:11px; }
-    div[data-testid="stVerticalBlockBorderWrapper"] { border-color:var(--line); border-radius:11px; background:white; box-shadow:0 10px 30px rgba(20,45,36,.05); }
-    .section-title { font:700 17px Manrope,sans-serif; margin:0; }
-    .section-sub { color:#8a9690; font-size:12px; margin:4px 0 14px; }
-    .quality { display:flex; gap:18px; font-size:11px; color:#78867f; padding:6px 0 0; }
-    .quality b { color:#2d493d; }
+    div[data-testid="stVerticalBlockBorderWrapper"] { border:1px solid var(--line); border-radius:14px; background:white; box-shadow:0 10px 30px rgba(20,43,68,.055); }
+    .section-title { color:var(--navy) !important; font:800 18px Manrope,sans-serif; margin:0; }
+    .section-sub { color:var(--muted); font-size:12px; margin:4px 0 14px; }
+    .kpi-grid { display:grid; grid-template-columns:1.35fr repeat(4,1fr); gap:13px; margin:18px 0 22px; }
+    .kpi-card {
+        position:relative; overflow:hidden; min-height:122px; padding:18px 19px 16px; background:var(--paper);
+        border:1px solid var(--line); border-radius:14px; box-shadow:0 7px 22px rgba(20,43,68,.06);
+    }
+    .kpi-card::before { content:''; position:absolute; left:0; top:0; bottom:0; width:4px; background:var(--orange); }
+    .kpi-card.primary { background:linear-gradient(135deg,#fff 0%,var(--orange-soft) 145%); }
+    .kpi-label { display:block; color:#6d7b88; font-size:11px; font-weight:800; letter-spacing:.8px; text-transform:uppercase; }
+    .kpi-value { display:block; color:var(--navy) !important; font:800 27px/1.12 Manrope,sans-serif; letter-spacing:-.8px; margin-top:13px; opacity:1 !important; }
+    .kpi-note { display:block; color:#9a7b59; font-size:10px; margin-top:8px; }
+    [data-testid="stMetricValue"], [data-testid="stMetricValue"] * { color:var(--navy) !important; opacity:1 !important; }
+    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * { color:var(--muted) !important; opacity:1 !important; }
+    .quality { display:flex; flex-wrap:wrap; gap:18px; font-size:11px; color:var(--muted); padding:8px 0 0; }
+    .quality b { color:var(--navy); }
     .quality .ok::before,.quality .warn::before { content:''; width:7px; height:7px; display:inline-block; border-radius:50%; margin-right:6px; }
-    .quality .ok::before { background:#53ad85; } .quality .warn::before { background:#e0ad63; }
-    [data-testid="stDataFrame"] { border:1px solid #edf0ee; border-radius:8px; }
-    .stButton button[kind="primary"] { background:var(--green); border-color:var(--green); font-weight:700; }
-    .stButton button { border-radius:8px; }
+    .quality .ok::before { background:#49a978; } .quality .warn::before { background:var(--orange); }
+    [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+    .stButton button[kind="primary"] { background:var(--orange); border-color:var(--orange); color:white; font-weight:800; }
+    .stButton button[kind="primary"]:hover { background:#e88626; border-color:#e88626; }
+    .stButton button, .stDownloadButton button, .stLinkButton a { border-radius:9px; }
+    [data-baseweb="select"] > div, [data-baseweb="input"] > div { border-color:#dfd4c9 !important; }
+    [data-baseweb="select"] > div, [data-baseweb="input"] > div, [data-testid="stTextInput"] input {
+        background:#fff !important; color:var(--navy) !important;
+    }
+    [data-testid="stAlert"] { background:var(--orange-soft) !important; color:var(--navy) !important; border-color:#f7c98f !important; }
+    [data-testid="stAlert"] * { color:var(--navy) !important; opacity:1 !important; }
     hr { border-color:var(--line) !important; }
-    @media(max-width:700px){ [data-testid="stAppViewContainer"] > .main .block-container{padding:1rem}.appbar{margin:-1rem -1rem 1.5rem;padding:14px 1rem}.sync{display:none}.hero h1{font-size:27px} }
+    @media(max-width:980px){ .kpi-grid{grid-template-columns:repeat(3,1fr)} .kpi-card.primary{grid-column:span 2} }
+    @media(max-width:700px){
+        [data-testid="stAppViewContainer"] > .main .block-container{padding:1rem .75rem 3rem}
+        .appbar{margin:-1rem -.75rem 1.2rem;padding:13px .9rem}.sync{display:none}.hero h1{font-size:28px}
+        .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:14px 0 18px}
+        .kpi-card,.kpi-card.primary{grid-column:auto;min-height:106px;padding:15px 13px 13px}
+        .kpi-card:last-child{grid-column:span 2}.kpi-value{font-size:22px}.kpi-label{font-size:10px}
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -369,12 +398,38 @@ total_asin = master.loc[~master["status"].astype(str).str.lower().eq("inactive")
 asin_sold = summary["asin"].nunique()
 sale_rate = asin_sold / total_asin if total_asin else 0
 
-k1, k2, k3, k4, k5 = st.columns([1.25, 1, 1, 1, 1])
-k1.metric("Net Revenue", money(summary["net_revenue"].sum()), help="Item Price + Shipping - Item Promotion - Shipping Promotion")
-k2.metric("Orders", f"{summary['orders'].sum():,.0f}")
-k3.metric("ASIN Sold", f"{asin_sold:,}")
-k4.metric("Total ASIN", f"{total_asin:,}")
-k5.metric("Sale Rate", f"{sale_rate:.1%}")
+st.markdown(
+    f"""
+    <div class="kpi-grid">
+      <div class="kpi-card primary">
+        <span class="kpi-label">Net Revenue</span>
+        <span class="kpi-value">{money(summary['net_revenue'].sum())}</span>
+        <span class="kpi-note">Sau shipping và promotion</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Orders</span>
+        <span class="kpi-value">{summary['orders'].sum():,.0f}</span>
+        <span class="kpi-note">Đơn hàng duy nhất</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">ASIN Sold</span>
+        <span class="kpi-value">{asin_sold:,}</span>
+        <span class="kpi-note">Có sale trong kỳ</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Total ASIN</span>
+        <span class="kpi-value">{total_asin:,}</span>
+        <span class="kpi-note">ASIN đang hoạt động</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Sale Rate</span>
+        <span class="kpi-value">{sale_rate:.1%}</span>
+        <span class="kpi-note">ASIN Sold / Total ASIN</span>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.write("")
 with st.container(border=True):
