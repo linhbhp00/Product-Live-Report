@@ -6,6 +6,7 @@ import json
 import os
 import re
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -26,6 +27,8 @@ MASTER_ALIASES = {
     "sku": ["sku", "amz sku", "amz_sku"],
     "product_name": ["product name", "product", "title"],
     "product_type": ["product type", "type"],
+    "store": ["amz store", "amazon store", "store"],
+    "fulfill_by": ["fulfill by", "fulfillment", "fulfillment by"],
     "asin_manager": ["owners", "asin manager", "product owner", "owner", "managed by", "manager"],
     "mrnd": ["mrnd idea", "mrnd", "is mrnd", "is_mrnd"],
     "listing_by": ["listing by", "listing_by"],
@@ -37,6 +40,8 @@ ORDER_ALIASES = {
     "order_date": ["order date", "date", "purchase date", "purchase-date"],
     "order_id": ["order id", "amazon order id", "amazon-order-id"],
     "order_status": ["order status", "order-status", "status"],
+    "item_status": ["item status", "item-status"],
+    "fulfillment_channel": ["fulfillment channel", "fulfillment-channel"],
     "asin": ["asin"],
     "qty": ["qty", "quantity", "quantity purchased"],
     "item_price": ["item price", "product sales", "price"],
@@ -91,9 +96,12 @@ def clean_master(raw: pd.DataFrame) -> pd.DataFrame:
     df["asin"] = df["asin"].fillna("").astype(str).str.strip().str.upper()
     df["record_id"] = df["record_id"].fillna("").astype(str).str.strip()
     df["image"] = df["image"].map(normalize_image_source)
-    df = df[df["asin"].ne("")].drop_duplicates("asin", keep="last")
+    df["fulfill_by"] = df["fulfill_by"].fillna("").astype(str).str.strip().str.upper()
+    df = df[df["asin"].ne("") & ~df["fulfill_by"].eq("FBA")].drop_duplicates("asin", keep="last")
     mrnd_text = df["mrnd"].fillna("").astype(str).str.strip().str.lower()
-    df["mrnd"] = ~mrnd_text.isin(["", "no", "false", "0", "none", "nan", "n"])
+    df["mrnd"] = ~mrnd_text.isin(["", "no", "false", "0", "0.0", "none", "nan", "n"])
+    store_text = df["store"].fillna("").astype(str).str.strip()
+    df["store"] = store_text.replace({"WR": "Wrappiness", "PAW": "Pawsionate"})
     df["status"] = df["status"].fillna("Active").replace("", "Active")
     return df[list(MASTER_ALIASES)]
 
@@ -109,17 +117,20 @@ def clean_orders(raw: pd.DataFrame) -> pd.DataFrame:
             df[column] = 0 if column in {"qty", "item_price", "shipping", "promotion", "ship_promotion"} else ""
     df["asin"] = df["asin"].fillna("").astype(str).str.strip().str.upper()
     df["order_id"] = df["order_id"].fillna("").astype(str).str.strip()
-    df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce", utc=True).dt.tz_convert(None)
+    df["order_date"] = (
+        pd.to_datetime(df["order_date"], errors="coerce", utc=True)
+        .dt.tz_convert("America/Los_Angeles")
+        .dt.tz_localize(None)
+    )
     for column in ["qty", "item_price", "shipping", "promotion", "ship_promotion"]:
         df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
-    df["net_revenue"] = (
-        df["item_price"]
-        + df["shipping"]
-        - df["promotion"].abs()
-        - df["ship_promotion"].abs()
-    )
-    cancelled = df["order_status"].fillna("").astype(str).str.strip().str.lower().eq("cancelled")
-    return df.loc[~cancelled].dropna(subset=["order_date"])
+    df["net_revenue"] = df["item_price"] + df["shipping"]
+    order_status = df["order_status"].fillna("").astype(str).str.strip().str.lower()
+    item_status = df["item_status"].fillna("").astype(str).str.strip().str.lower()
+    cancelled = order_status.isin(["cancelled", "canceled"]) | item_status.isin(["cancelled", "canceled"])
+    fulfillment = df["fulfillment_channel"].fillna("").astype(str).str.strip().str.lower()
+    fbm = fulfillment.eq("") | fulfillment.isin(["merchant", "fbm"])
+    return df.loc[~cancelled & fbm].dropna(subset=["order_date"])
 
 
 def load_default_data() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -138,6 +149,47 @@ def lark_settings() -> dict[str, str]:
         "table_id": str(section.get("table_id") or LARK_TABLE_ID),
         "view_id": str(section.get("view_id") or LARK_VIEW_ID),
     }
+
+
+def amazon_settings() -> dict[str, str]:
+    try:
+        section = dict(st.secrets.get("amazon", {}))
+    except Exception:
+        section = {}
+    return {
+        "access_token": str(section.get("access_token") or os.getenv("AMAZON_CREATORS_ACCESS_TOKEN", "")),
+        "partner_tag": str(section.get("partner_tag") or os.getenv("AMAZON_PARTNER_TAG", "")),
+        "marketplace": str(section.get("marketplace") or "www.amazon.com"),
+    }
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_amazon_images(asins: tuple[str, ...], access_token: str, partner_tag: str, marketplace: str) -> dict[str, str]:
+    images: dict[str, str] = {}
+    for offset in range(0, len(asins), 10):
+        item_ids = list(asins[offset:offset + 10])
+        response = requests.post(
+            "https://creatorsapi.amazon/catalog/v1/getItems",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "x-marketplace": marketplace,
+            },
+            json={
+                "itemIds": item_ids,
+                "itemIdType": "ASIN",
+                "marketplace": marketplace,
+                "partnerTag": partner_tag,
+                "resources": ["images.primary.medium"],
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        for item in response.json().get("itemsResult", {}).get("items", []):
+            source = item.get("images", {}).get("primary", {}).get("medium", {}).get("url", "")
+            if source:
+                images[str(item.get("asin", "")).upper()] = source
+    return images
 
 
 def flatten_lark_value(value):
@@ -310,7 +362,7 @@ st.markdown(
     div[data-testid="stVerticalBlockBorderWrapper"] { border:1px solid var(--line); border-radius:14px; background:white; box-shadow:0 10px 30px rgba(20,43,68,.055); }
     .section-title { color:var(--navy) !important; font:800 18px Manrope,sans-serif; margin:0; }
     .section-sub { color:var(--muted); font-size:12px; margin:4px 0 14px; }
-    .kpi-grid { display:grid; grid-template-columns:1.35fr repeat(4,1fr); gap:13px; margin:18px 0 22px; }
+    .kpi-grid { display:grid; grid-template-columns:1.35fr repeat(3,1fr); gap:13px; margin:18px 0 22px; }
     .kpi-card {
         position:relative; overflow:hidden; min-height:122px; padding:18px 19px 16px; background:var(--paper);
         border:1px solid var(--line); border-radius:14px; box-shadow:0 7px 22px rgba(20,43,68,.06);
@@ -337,13 +389,13 @@ st.markdown(
     [data-testid="stAlert"] { background:var(--orange-soft) !important; color:var(--navy) !important; border-color:#f7c98f !important; }
     [data-testid="stAlert"] * { color:var(--navy) !important; opacity:1 !important; }
     hr { border-color:var(--line) !important; }
-    @media(max-width:980px){ .kpi-grid{grid-template-columns:repeat(3,1fr)} .kpi-card.primary{grid-column:span 2} }
+    @media(max-width:980px){ .kpi-grid{grid-template-columns:repeat(2,1fr)} .kpi-card.primary{grid-column:auto} }
     @media(max-width:700px){
         [data-testid="stAppViewContainer"] > .main .block-container{padding:1rem .75rem 3rem}
         .appbar{margin:-1rem -.75rem 1.2rem;padding:13px .9rem}.sync{display:none}.hero h1{font-size:28px}
         .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:14px 0 18px}
         .kpi-card,.kpi-card.primary{grid-column:auto;min-height:106px;padding:15px 13px 13px}
-        .kpi-card:last-child{grid-column:span 2}.kpi-value{font-size:22px}.kpi-label{font-size:10px}
+        .kpi-card:last-child{grid-column:auto}.kpi-value{font-size:22px}.kpi-label{font-size:10px}
     }
     </style>
     """,
@@ -375,7 +427,7 @@ with st.expander("↑  Import dữ liệu", expanded=False):
             type=["txt", "tsv", "csv", "xlsx", "xls"],
             help="Amazon Order Report theo ngày",
         )
-        st.caption("Hỗ trợ trực tiếp TXT tab-delimited của Amazon và tự loại đơn Cancelled.")
+        st.caption("Purchase Time được đổi sang America/Los_Angeles; tự loại Cancelled/Canceled và fulfillment Amazon (FBA).")
     if st.button("Kiểm tra & import", type="primary", use_container_width=True):
         apply_import(master_upload, order_upload)
 
@@ -409,7 +461,7 @@ minimum, maximum = mapped_orders["order_date"].min().date(), mapped_orders["orde
 
 with st.container(border=True):
     st.markdown('<p class="section-title">Bộ lọc báo cáo</p><p class="section-sub">KPI và bảng được tính lại từ transaction gốc.</p>', unsafe_allow_html=True)
-    f1, f2, f3, f4, f5 = st.columns([1.45, 1.1, 1, 1, .8])
+    f1, f2, f3, f4, f5, f6 = st.columns([1.35, 1.1, 1, 1, .9, .75])
     with f1:
         query = st.text_input("Tìm kiếm", placeholder="SKU, ASIN hoặc Product Name")
     with f2:
@@ -421,6 +473,9 @@ with st.container(border=True):
         manager_options = sorted(master["asin_manager"].dropna().astype(str).loc[lambda x: x.ne("")].unique())
         selected_managers = st.multiselect("ASIN Manager", manager_options, placeholder="Tất cả quản lý")
     with f5:
+        store_options = sorted(master["store"].dropna().astype(str).loc[lambda x: x.ne("")].unique())
+        selected_stores = st.multiselect("Store", store_options, placeholder="Tất cả store")
+    with f6:
         mrnd_filter = st.selectbox("MRnD", ["Tất cả", "MRnD", "Non-MRnD"])
 
 if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -428,38 +483,39 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
 else:
     start_date = end_date = pd.Timestamp(date_range)
 
-period_orders = mapped_orders[mapped_orders["order_date"].between(start_date, end_date + pd.Timedelta(days=1), inclusive="left")]
-summary = (
-    period_orders.groupby("asin", as_index=False)
-    .agg(net_revenue=("net_revenue", "sum"), orders=("order_id", "nunique"), qty=("qty", "sum"))
-    .merge(master, on="asin", how="left")
-)
-
+master_scope = master.copy()
 if query:
     needle = query.strip().lower()
-    summary = summary[
-        summary[["sku", "asin", "product_name"]].fillna("").astype(str).apply(
+    master_scope = master_scope[
+        master_scope[["sku", "asin", "product_name"]].fillna("").astype(str).apply(
             lambda column: column.str.lower().str.contains(needle, regex=False)
         ).any(axis=1)
     ]
 if selected_types:
-    summary = summary[summary["product_type"].isin(selected_types)]
+    master_scope = master_scope[master_scope["product_type"].isin(selected_types)]
 if selected_managers:
-    summary = summary[summary["asin_manager"].isin(selected_managers)]
+    master_scope = master_scope[master_scope["asin_manager"].isin(selected_managers)]
+if selected_stores:
+    master_scope = master_scope[master_scope["store"].isin(selected_stores)]
 if mrnd_filter != "Tất cả":
-    summary = summary[summary["mrnd"].eq(mrnd_filter == "MRnD")]
+    master_scope = master_scope[master_scope["mrnd"].eq(mrnd_filter == "MRnD")]
 
-total_asin = master.loc[~master["status"].astype(str).str.lower().eq("inactive"), "asin"].nunique()
+period_orders = mapped_orders[mapped_orders["order_date"].between(start_date, end_date + pd.Timedelta(days=1), inclusive="left")]
+summary = (
+    period_orders.groupby("asin", as_index=False)
+    .agg(net_revenue=("net_revenue", "sum"), orders=("order_id", "nunique"), qty=("qty", "sum"))
+    .merge(master_scope, on="asin", how="inner")
+)
+total_asin = master_scope.loc[~master_scope["status"].astype(str).str.lower().eq("inactive"), "asin"].nunique()
 asin_sold = summary["asin"].nunique()
-sale_rate = asin_sold / total_asin if total_asin else 0
 
 st.markdown(
     f"""
     <div class="kpi-grid">
       <div class="kpi-card primary">
-        <span class="kpi-label">Net Revenue</span>
+        <span class="kpi-label">Revenue</span>
         <span class="kpi-value">{money(summary['net_revenue'].sum())}</span>
-        <span class="kpi-note">Sau shipping và promotion</span>
+        <span class="kpi-note">Item Price + Shipping Price</span>
       </div>
       <div class="kpi-card">
         <span class="kpi-label">Orders</span>
@@ -476,15 +532,37 @@ st.markdown(
         <span class="kpi-value">{total_asin:,}</span>
         <span class="kpi-note">ASIN đang hoạt động</span>
       </div>
-      <div class="kpi-card">
-        <span class="kpi-label">Sale Rate</span>
-        <span class="kpi-value">{sale_rate:.1%}</span>
-        <span class="kpi-note">ASIN Sold / Total ASIN</span>
-      </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
+st.write("")
+with st.container(border=True):
+    st.markdown('<p class="section-title">Revenue by MRnD & Store</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-sub">Vòng trong: MRnD / Non-MRnD · Vòng ngoài: chi tiết Store trong MRnD</p>', unsafe_allow_html=True)
+    chart_data = summary[["mrnd", "store", "net_revenue"]].copy()
+    chart_data["MRnD"] = chart_data["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
+    chart_data["Store detail"] = chart_data.apply(
+        lambda row: f"MRnD · {row['store'] or 'Chưa xác định'}" if row["mrnd"] else "Non-MRnD",
+        axis=1,
+    )
+    inner = chart_data.groupby("MRnD", as_index=False)["net_revenue"].sum()
+    outer = chart_data.groupby("Store detail", as_index=False)["net_revenue"].sum()
+    if chart_data["net_revenue"].sum() > 0:
+        inner_chart = alt.Chart(inner).mark_arc(innerRadius=48, outerRadius=92, stroke="white", strokeWidth=2).encode(
+            theta=alt.Theta("net_revenue:Q", stack=True),
+            color=alt.Color("MRnD:N", scale=alt.Scale(domain=["MRnD", "Non-MRnD"], range=["#f59a3d", "#27445f"]), title="Nhóm"),
+            tooltip=[alt.Tooltip("MRnD:N"), alt.Tooltip("net_revenue:Q", title="Revenue", format="$,.2f")],
+        )
+        outer_chart = alt.Chart(outer).mark_arc(innerRadius=101, outerRadius=137, stroke="white", strokeWidth=2).encode(
+            theta=alt.Theta("net_revenue:Q", stack=True),
+            color=alt.Color("Store detail:N", scale=alt.Scale(range=["#f59a3d", "#ffc477", "#ffdca9", "#27445f"]), title="MRnD theo Store"),
+            tooltip=[alt.Tooltip("Store detail:N"), alt.Tooltip("net_revenue:Q", title="Revenue", format="$,.2f")],
+        )
+        st.altair_chart((inner_chart + outer_chart).resolve_scale(color="independent").properties(height=350), use_container_width=True)
+    else:
+        st.info("Không có revenue trong bộ lọc hiện tại.")
 
 st.write("")
 with st.container(border=True):
@@ -493,18 +571,37 @@ with st.container(border=True):
         st.markdown('<p class="section-title">Product performance</p>', unsafe_allow_html=True)
         st.markdown(f'<p class="section-sub">Hiển thị {len(summary):,} sản phẩm đã map ASIN</p>', unsafe_allow_html=True)
     with h2:
-        sort_column = st.selectbox("Sắp xếp theo", ["Net Revenue", "Orders", "Qty", "Product Name", "Product Type", "ASIN Manager"], label_visibility="collapsed")
+        sort_column = st.selectbox("Sắp xếp theo", ["Revenue", "Orders", "Qty", "Product Name", "Product Type", "ASIN Manager", "Store"], label_visibility="collapsed")
     with h3:
         direction = st.selectbox("Thứ tự", ["Giảm dần", "Tăng dần"], label_visibility="collapsed")
 
     sort_map = {
-        "Net Revenue": "net_revenue", "Orders": "orders", "Qty": "qty", "Product Name": "product_name",
-        "Product Type": "product_type", "ASIN Manager": "asin_manager",
+        "Revenue": "net_revenue", "Orders": "orders", "Qty": "qty", "Product Name": "product_name",
+        "Product Type": "product_type", "ASIN Manager": "asin_manager", "Store": "store",
     }
     summary = summary.sort_values(sort_map[sort_column], ascending=direction == "Tăng dần", na_position="last")
-    display = summary[["image", "record_id", "product_name", "sku", "asin", "product_type", "asin_manager", "mrnd", "listing_by", "custom_by", "net_revenue", "orders", "qty"]].copy()
+    if "amazon_images" not in st.session_state:
+        st.session_state.amazon_images = {}
+    summary["image"] = summary.apply(
+        lambda row: row["image"] or st.session_state.amazon_images.get(row["asin"], ""), axis=1
+    )
+    missing_images = summary.loc[summary["image"].eq(""), "asin"].drop_duplicates().tolist()
+    amazon = amazon_settings()
+    if missing_images and amazon["access_token"] and amazon["partner_tag"]:
+        if st.button("↻  Lấy ảnh Amazon cho 100 ASIN tiếp theo"):
+            try:
+                with st.spinner("Đang lấy ảnh chính thức từ Amazon..."):
+                    found = fetch_amazon_images(tuple(missing_images[:100]), **amazon)
+                st.session_state.amazon_images.update(found)
+                st.success(f"Đã bổ sung {len(found):,} ảnh Amazon.")
+                st.rerun()
+            except Exception as exc:
+                st.warning(f"Chưa lấy được ảnh Amazon: {exc}")
+    elif missing_images:
+        st.caption("Ảnh trống có thể tự bổ sung bằng Amazon Creators API. Cấu hình access token và partner tag trong Streamlit Secrets.")
+    display = summary[["image", "record_id", "product_name", "sku", "asin", "product_type", "store", "asin_manager", "mrnd", "listing_by", "custom_by", "net_revenue", "orders", "qty"]].copy()
     display["mrnd"] = display["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
-    display.columns = ["Image", "Record ID", "Product Name", "SKU", "ASIN", "Product Type", "ASIN Manager", "MRnD", "Listing By", "Custom By", "Net Revenue", "Orders", "Qty"]
+    display.columns = ["Image", "Record ID", "Product Name", "SKU", "ASIN", "Product Type", "Store", "ASIN Manager", "MRnD", "Listing By", "Custom By", "Revenue", "Orders", "Qty"]
     st.dataframe(
         display,
         use_container_width=True,
@@ -513,7 +610,7 @@ with st.container(border=True):
         column_config={
             "Image": st.column_config.ImageColumn("Image", width="small"),
             "Record ID": st.column_config.TextColumn("Record ID", width="medium"),
-            "Net Revenue": st.column_config.NumberColumn(format="$%.2f"),
+            "Revenue": st.column_config.NumberColumn(format="$%.2f"),
             "Orders": st.column_config.NumberColumn(format="%d"),
             "Qty": st.column_config.NumberColumn(format="%.0f"),
         },
@@ -530,7 +627,7 @@ with st.expander("Data model & cohort roadmap"):
         """
         **Product Master:** upload file export của bảng `TOTAL ASINs` / view `All`, hoặc đồng bộ API khi được cấp quyền. `Managed By → ASIN Manager`, `MRnD Idea → MRnD`; `Record ID`, `Image`, `Listing By` và `Custom By` lấy trực tiếp theo ASIN. Ảnh sẽ hiển thị khi trường `Image` chứa URL có thể truy cập.
 
-        **Order Report:** chỉ lưu transaction theo ngày. `Net Revenue = Item Price + Shipping - Item Promotion - Shipping Promotion`; đơn `Cancelled` được loại.
+        **Order Report:** chỉ lưu transaction theo ngày. `Purchase Time` được đổi từ UTC sang `America/Los_Angeles`; `Revenue = Item Price + Shipping Price`. Đơn `Cancelled/Canceled` và fulfillment `Amazon/FBA` được loại.
         **Cohort D7/D14/D30:** thêm `Live Date` vào Product Master, tính tuổi listing từ `Order Date - Live Date`, rồi nhóm doanh thu theo ngày tuổi.
         """
     )
