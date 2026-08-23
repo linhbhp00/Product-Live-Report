@@ -2,23 +2,29 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import os
 import re
 
 import pandas as pd
+import requests
 import streamlit as st
 
 
 st.set_page_config(page_title="Product Live Report", page_icon="📈", layout="wide")
 
 ROOT = Path(__file__).parent
+LARK_BASE_URL = "https://everlastify.jp.larksuite.com/base/RXnkbQ0NXaPKanshOEfjtNwjp7k?table=tblgsIV71tjUvLlB&view=vewuAjvYoo"
+LARK_APP_TOKEN = "RXnkbQ0NXaPKanshOEfjtNwjp7k"
+LARK_TABLE_ID = "tblgsIV71tjUvLlB"
+LARK_VIEW_ID = "vewuAjvYoo"
 
 MASTER_ALIASES = {
     "asin": ["asin"],
     "sku": ["sku", "amz sku", "amz_sku"],
     "product_name": ["product name", "product", "title"],
     "product_type": ["product type", "type"],
-    "asin_manager": ["asin manager", "product owner", "owner", "manager"],
-    "mrnd": ["mrnd", "is mrnd", "is_mrnd"],
+    "asin_manager": ["owners", "asin manager", "product owner", "owner", "managed by", "manager"],
+    "mrnd": ["mrnd idea", "mrnd", "is mrnd", "is_mrnd"],
     "listing_by": ["listing by", "listing_by"],
     "custom_by": ["custom by", "custom_by"],
     "status": ["status"],
@@ -74,9 +80,8 @@ def clean_master(raw: pd.DataFrame) -> pd.DataFrame:
             df[column] = ""
     df["asin"] = df["asin"].fillna("").astype(str).str.strip().str.upper()
     df = df[df["asin"].ne("")].drop_duplicates("asin", keep="last")
-    df["mrnd"] = df["mrnd"].fillna("").astype(str).str.strip().str.lower().isin(
-        ["yes", "true", "1", "mrnd", "y"]
-    )
+    mrnd_text = df["mrnd"].fillna("").astype(str).str.strip().str.lower()
+    df["mrnd"] = ~mrnd_text.isin(["", "no", "false", "0", "none", "nan", "n"])
     df["status"] = df["status"].fillna("Active").replace("", "Active")
     return df[list(MASTER_ALIASES)]
 
@@ -103,9 +108,87 @@ def load_default_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     return clean_master(read_sample("product_master.csv")), clean_orders(read_sample("order_report.csv"))
 
 
+def lark_settings() -> dict[str, str]:
+    try:
+        section = dict(st.secrets.get("lark", {}))
+    except Exception:
+        section = {}
+    return {
+        "app_id": str(section.get("app_id") or os.getenv("LARK_APP_ID", "")),
+        "app_secret": str(section.get("app_secret") or os.getenv("LARK_APP_SECRET", "")),
+        "app_token": str(section.get("app_token") or LARK_APP_TOKEN),
+        "table_id": str(section.get("table_id") or LARK_TABLE_ID),
+        "view_id": str(section.get("view_id") or LARK_VIEW_ID),
+    }
+
+
+def flatten_lark_value(value):
+    if isinstance(value, list):
+        parts = [flatten_lark_value(item) for item in value]
+        return ", ".join(str(item) for item in parts if str(item).strip())
+    if isinstance(value, dict):
+        for key in ("name", "text", "display_name", "en_name", "link"):
+            if value.get(key):
+                return value[key]
+        return ", ".join(str(item) for item in value.values() if item not in (None, ""))
+    return "" if value is None else value
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_lark_master(app_id: str, app_secret: str, app_token: str, table_id: str, view_id: str) -> pd.DataFrame:
+    token_response = requests.post(
+        "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": app_id, "app_secret": app_secret},
+        timeout=20,
+    )
+    token_response.raise_for_status()
+    token_payload = token_response.json()
+    token = token_payload.get("tenant_access_token")
+    if not token:
+        raise ValueError(token_payload.get("msg", "Không lấy được Lark access token."))
+
+    records, page_token = [], None
+    while True:
+        params = {"page_size": 500, "view_id": view_id}
+        if page_token:
+            params["page_token"] = page_token
+        response = requests.get(
+            f"https://open.larksuite.com/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("code") != 0:
+            raise ValueError(payload.get("msg", "Không đọc được Lark Base."))
+        data = payload.get("data", {})
+        records.extend(item.get("fields", {}) for item in data.get("items", []))
+        if not data.get("has_more"):
+            break
+        page_token = data.get("page_token")
+
+    normalized = [{key: flatten_lark_value(value) for key, value in record.items()} for record in records]
+    return clean_master(pd.DataFrame(normalized))
+
+
 def initialize_state() -> None:
     if "product_master" not in st.session_state:
-        master, orders = load_default_data()
+        sample_master, orders = load_default_data()
+        settings = lark_settings()
+        if settings["app_id"] and settings["app_secret"]:
+            try:
+                master = fetch_lark_master(**settings)
+                st.session_state.lark_connected = True
+                st.session_state.master_source = f"Lark Base · {len(master):,} ASIN"
+            except Exception as exc:
+                master = sample_master
+                st.session_state.lark_connected = False
+                st.session_state.master_source = f"Lark chưa kết nối · {exc}"
+        else:
+            master = sample_master
+            st.session_state.lark_connected = False
+            st.session_state.master_source = "Lark chưa cấu hình · đang dùng dữ liệu mẫu"
         st.session_state.product_master = master
         st.session_state.orders = orders
         st.session_state.data_source = "Dữ liệu mẫu"
@@ -115,14 +198,12 @@ def money(value: float) -> str:
     return f"${value:,.2f}"
 
 
-def apply_import(order_file, master_file) -> None:
+def apply_import(order_file) -> None:
     if order_file is None:
         st.error("Vui lòng chọn Order Report.")
         return
     try:
-        master = clean_master(read_upload(master_file)) if master_file else st.session_state.product_master
         orders = clean_orders(read_upload(order_file))
-        st.session_state.product_master = master
         st.session_state.orders = orders
         st.session_state.data_source = order_file.name
         st.success(f"Đã import {len(orders):,} transaction từ {order_file.name}.")
@@ -172,7 +253,7 @@ st.markdown(
 st.markdown(
     f"""
     <div class="appbar"><div class="brand"><span class="brand-badge">P</span>Product Live Report</div>
-    <div class="sync"><b>●</b>&nbsp; {st.session_state.data_source}</div></div>
+    <div class="sync"><b>●</b>&nbsp; {st.session_state.master_source}</div></div>
     <div class="hero"><div><div class="eyebrow">PERFORMANCE OVERVIEW</div><h1>Sales performance</h1>
     <p>Order Report được map với Product Master bằng ASIN.</p></div></div>
     """,
@@ -180,15 +261,32 @@ st.markdown(
 )
 
 with st.expander("↑  Import dữ liệu", expanded=False):
-    left, right = st.columns(2)
+    left, right = st.columns([1.25, 1])
     with left:
         order_upload = st.file_uploader("Order Report", type=["csv", "xlsx", "xls"], help="Transaction data theo ngày")
         st.caption("Cần: Order Date, Order ID, ASIN, Qty, Item Price, Shipping, Promotion")
     with right:
-        master_upload = st.file_uploader("Product Master từ Lark Base", type=["csv", "xlsx", "xls"], help="Không chọn để dùng master hiện tại")
-        st.caption("Cần: ASIN, SKU, Product Name, Product Type, Owner, MRnD, Listing By, Custom By")
+        st.markdown("**Product Master cố định**")
+        st.link_button("Mở bảng TOTAL ASINs trên Lark", LARK_BASE_URL, use_container_width=True)
+        st.caption("Map ASIN, AMZ SKU, Product Name, Product Type, Owners, MRnD Idea, Listing By và Custom By.")
     if st.button("Kiểm tra & import", type="primary", use_container_width=True):
-        apply_import(order_upload, master_upload)
+        apply_import(order_upload)
+
+settings = lark_settings()
+if settings["app_id"] and settings["app_secret"]:
+    if st.button("↻  Đồng bộ lại Product Master từ Lark"):
+        try:
+            fetch_lark_master.clear()
+            synced_master = fetch_lark_master(**settings)
+            st.session_state.product_master = synced_master
+            st.session_state.lark_connected = True
+            st.session_state.master_source = f"Lark Base · {len(synced_master):,} ASIN"
+            st.success(f"Đã đồng bộ {len(synced_master):,} ASIN từ TOTAL ASINs.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Không thể đồng bộ Lark: {exc}")
+else:
+    st.info("App đã cố định Product Master vào bảng TOTAL ASINs. Hãy cấu hình LARK_APP_ID và LARK_APP_SECRET trong Streamlit Secrets để bật đồng bộ trực tiếp.")
 
 master = st.session_state.product_master.copy()
 orders = st.session_state.orders.copy()
@@ -291,7 +389,7 @@ with st.container(border=True):
 with st.expander("Data model & cohort roadmap"):
     st.markdown(
         """
-        **Product Master:** một dòng cho mỗi ASIN; lưu SKU, Product Name, Product Type, Owner, MRnD, Listing By, Custom By và Status.  
+        **Product Master duy nhất:** bảng `TOTAL ASINs` / view `All` trên Lark Base. `Owners → ASIN Manager`, `MRnD Idea → MRnD`.  
         **Order Report:** chỉ lưu transaction theo ngày. `Net Revenue = Item Price + Shipping + Promotion`.  
         **Cohort D7/D14/D30:** thêm `Live Date` vào Product Master, tính tuổi listing từ `Order Date - Live Date`, rồi nhóm doanh thu theo ngày tuổi.
         """
