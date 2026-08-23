@@ -33,11 +33,13 @@ MASTER_ALIASES = {
 ORDER_ALIASES = {
     "order_date": ["order date", "date", "purchase date", "purchase-date"],
     "order_id": ["order id", "amazon order id", "amazon-order-id"],
+    "order_status": ["order status", "order-status", "status"],
     "asin": ["asin"],
     "qty": ["qty", "quantity", "quantity purchased"],
     "item_price": ["item price", "product sales", "price"],
     "shipping": ["shipping", "shipping price"],
     "promotion": ["promotion", "promotion discount", "item promotion discount"],
+    "ship_promotion": ["ship promotion discount", "shipping promotion discount"],
 }
 
 
@@ -61,9 +63,11 @@ def read_upload(file) -> pd.DataFrame:
     suffix = Path(file.name).suffix.lower()
     if suffix == ".csv":
         return pd.read_csv(file)
+    if suffix in {".txt", ".tsv"}:
+        return pd.read_csv(file, sep="\t")
     if suffix in {".xlsx", ".xls"}:
         return pd.read_excel(file)
-    raise ValueError("Chỉ hỗ trợ CSV, XLSX hoặc XLS.")
+    raise ValueError("Chỉ hỗ trợ CSV, TXT/TSV, XLSX hoặc XLS.")
 
 
 @st.cache_data
@@ -94,14 +98,20 @@ def clean_orders(raw: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Order Report thiếu cột: " + ", ".join(missing))
     for column in ORDER_ALIASES:
         if column not in df:
-            df[column] = 0 if column in {"qty", "item_price", "shipping", "promotion"} else ""
+            df[column] = 0 if column in {"qty", "item_price", "shipping", "promotion", "ship_promotion"} else ""
     df["asin"] = df["asin"].fillna("").astype(str).str.strip().str.upper()
     df["order_id"] = df["order_id"].fillna("").astype(str).str.strip()
     df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
-    for column in ["qty", "item_price", "shipping", "promotion"]:
+    for column in ["qty", "item_price", "shipping", "promotion", "ship_promotion"]:
         df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
-    df["net_revenue"] = df["item_price"] + df["shipping"] + df["promotion"]
-    return df.dropna(subset=["order_date"])
+    df["net_revenue"] = (
+        df["item_price"]
+        + df["shipping"]
+        - df["promotion"].abs()
+        - df["ship_promotion"].abs()
+    )
+    cancelled = df["order_status"].fillna("").astype(str).str.strip().str.lower().eq("cancelled")
+    return df.loc[~cancelled].dropna(subset=["order_date"])
 
 
 def load_default_data() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -198,15 +208,21 @@ def money(value: float) -> str:
     return f"${value:,.2f}"
 
 
-def apply_import(order_file) -> None:
+def apply_import(master_file, order_file) -> None:
     if order_file is None:
         st.error("Vui lòng chọn Order Report.")
         return
     try:
+        if master_file is not None:
+            master = clean_master(read_upload(master_file))
+            st.session_state.product_master = master
+            st.session_state.lark_connected = False
+            st.session_state.master_source = f"Product Master upload · {len(master):,} ASIN"
         orders = clean_orders(read_upload(order_file))
         st.session_state.orders = orders
         st.session_state.data_source = order_file.name
-        st.success(f"Đã import {len(orders):,} transaction từ {order_file.name}.")
+        master_note = f" và {len(st.session_state.product_master):,} ASIN" if master_file is not None else ""
+        st.success(f"Đã import {len(orders):,} transaction{master_note}.")
     except Exception as exc:
         st.error(str(exc))
 
@@ -261,16 +277,23 @@ st.markdown(
 )
 
 with st.expander("↑  Import dữ liệu", expanded=False):
-    left, right = st.columns([1.25, 1])
+    left, right = st.columns(2)
     with left:
-        order_upload = st.file_uploader("Order Report", type=["csv", "xlsx", "xls"], help="Transaction data theo ngày")
-        st.caption("Cần: Order Date, Order ID, ASIN, Qty, Item Price, Shipping, Promotion")
+        master_upload = st.file_uploader(
+            "Product Master từ Lark Base",
+            type=["csv", "xlsx", "xls"],
+            help="File export của bảng TOTAL ASINs / view All",
+        )
+        st.caption("Cần: ASIN. Tự nhận AMZ SKU, Product Name, Product Type, Managed By, MRnD Idea, Listing By và Custom By.")
     with right:
-        st.markdown("**Product Master cố định**")
-        st.link_button("Mở bảng TOTAL ASINs trên Lark", LARK_BASE_URL, use_container_width=True)
-        st.caption("Map ASIN, AMZ SKU, Product Name, Product Type, Owners, MRnD Idea, Listing By và Custom By.")
+        order_upload = st.file_uploader(
+            "Order Report",
+            type=["txt", "tsv", "csv", "xlsx", "xls"],
+            help="Amazon Order Report theo ngày",
+        )
+        st.caption("Hỗ trợ trực tiếp TXT tab-delimited của Amazon và tự loại đơn Cancelled.")
     if st.button("Kiểm tra & import", type="primary", use_container_width=True):
-        apply_import(order_upload)
+        apply_import(master_upload, order_upload)
 
 settings = lark_settings()
 if settings["app_id"] and settings["app_secret"]:
@@ -347,7 +370,7 @@ asin_sold = summary["asin"].nunique()
 sale_rate = asin_sold / total_asin if total_asin else 0
 
 k1, k2, k3, k4, k5 = st.columns([1.25, 1, 1, 1, 1])
-k1.metric("Net Revenue", money(summary["net_revenue"].sum()), help="Item Price + Shipping + Promotion")
+k1.metric("Net Revenue", money(summary["net_revenue"].sum()), help="Item Price + Shipping - Item Promotion - Shipping Promotion")
 k2.metric("Orders", f"{summary['orders'].sum():,.0f}")
 k3.metric("ASIN Sold", f"{asin_sold:,}")
 k4.metric("Total ASIN", f"{total_asin:,}")
@@ -389,8 +412,9 @@ with st.container(border=True):
 with st.expander("Data model & cohort roadmap"):
     st.markdown(
         """
-        **Product Master duy nhất:** bảng `TOTAL ASINs` / view `All` trên Lark Base. `Owners → ASIN Manager`, `MRnD Idea → MRnD`.  
-        **Order Report:** chỉ lưu transaction theo ngày. `Net Revenue = Item Price + Shipping + Promotion`.  
+        **Product Master:** upload file export của bảng `TOTAL ASINs` / view `All`, hoặc đồng bộ API khi được cấp quyền. `Managed By → ASIN Manager`, `MRnD Idea → MRnD`.
+
+        **Order Report:** chỉ lưu transaction theo ngày. `Net Revenue = Item Price + Shipping - Item Promotion - Shipping Promotion`; đơn `Cancelled` được loại.
         **Cohort D7/D14/D30:** thêm `Live Date` vào Product Master, tính tuổi listing từ `Order Date - Live Date`, rồi nhóm doanh thu theo ngày tuổi.
         """
     )

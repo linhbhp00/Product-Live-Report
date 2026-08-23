@@ -1,6 +1,6 @@
 # Product Live Report — Streamlit
 
-Streamlit MVP để upload Order Report theo ngày, map ASIN với **một Product Master duy nhất** là bảng `TOTAL ASINs` / view `All` trên Lark Base và phân tích sale theo thời gian.
+Streamlit MVP để upload Order Report theo ngày, map ASIN với Product Master từ bảng `TOTAL ASINs` / view `All` trên Lark Base và phân tích sale theo thời gian. Nếu không có quyền Lark API, có thể upload trực tiếp file export của Base.
 
 ## Chạy local
 
@@ -11,11 +11,11 @@ streamlit run app.py
 
 ## Dữ liệu đầu vào
 
-- **Product Master cố định:** [TOTAL ASINs / All](https://everlastify.jp.larksuite.com/base/RXnkbQ0NXaPKanshOEfjtNwjp7k?table=tblgsIV71tjUvLlB&view=vewuAjvYoo).
-- Mapping: `ASIN`, `AMZ SKU → SKU`, `Product Name`, `Product Type`, `Owners → ASIN Manager`, `MRnD Idea → MRnD`, `Listing By`, `Custom By`, `Status`.
-- **Order Report:** Order Date, Order ID, ASIN, Qty, Item Price, Shipping, Promotion.
+- **Product Master:** export [TOTAL ASINs / All](https://everlastify.jp.larksuite.com/base/RXnkbQ0NXaPKanshOEfjtNwjp7k?table=tblgsIV71tjUvLlB&view=vewuAjvYoo) thành `.xlsx`/`.csv`, hoặc đồng bộ bằng API.
+- Mapping: `ASIN`, `AMZ SKU → SKU`, `Product Name`, `Product Type`, `Managed By/Owners → ASIN Manager`, `MRnD Idea → MRnD`, `Listing By`, `Custom By`, `Status`.
+- **Order Report:** hỗ trợ trực tiếp file `.txt` tab-delimited của Amazon cùng `.tsv`, `.csv`, `.xlsx`, `.xls`.
 
-Hỗ trợ `.csv`, `.xlsx` và `.xls`. Promotion nên là số âm nếu là khoản giảm giá.
+`Net Revenue = Item Price + Shipping Price - Item Promotion Discount - Ship Promotion Discount`. App tự loại đơn `Cancelled`.
 
 ## Deploy trên Streamlit Community Cloud
 
