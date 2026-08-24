@@ -23,7 +23,10 @@ MASTER_ALIASES = {
     "mrnd": ["mrnd idea", "mrnd", "is mrnd", "is_mrnd"],
     "listing_by": ["listing by", "listing_by"],
     "custom_by": ["custom by", "custom_by"],
-    "custom_check_done": ["custom check done", "custom_check_done", "custom done", "custom done date"],
+    "custom_check_done": [
+        "custom check done", "custom_check_done", "custom done", "custom done date",
+        "custom check done date", "custom check done time", "custom check done at",
+    ],
     "status": ["status"],
 }
 
@@ -56,6 +59,14 @@ def standardize_columns(df: pd.DataFrame, aliases: dict[str, list[str]]) -> pd.D
             if original is not None:
                 rename[original] = target
                 break
+        # Lark/Excel exports can append a field type or annotation to the
+        # column name, for example "Custom Check Done (Date)". Keep this
+        # fallback narrowly scoped so unrelated date fields are never used.
+        if target == "custom_check_done" and target not in rename.values():
+            for normalized_name, original in normalized.items():
+                if normalized_name.startswith(("custom check done ", "custom done ")):
+                    rename[original] = target
+                    break
     return df.rename(columns=rename)
 
 
@@ -93,7 +104,9 @@ def parse_custom_done(series: pd.Series) -> pd.Series:
     numeric_dates = epoch_ms | epoch_seconds | excel_serial
     text_mask = ~numeric_dates & series.notna() & series.astype(str).str.strip().ne("")
     if text_mask.any():
-        parsed = pd.to_datetime(series.loc[text_mask], errors="coerce")
+        # `format="mixed"` parses each cell independently. Lark/Excel exports
+        # often mix date-only and date-time text in the same column.
+        parsed = pd.to_datetime(series.loc[text_mask], errors="coerce", format="mixed")
         if getattr(parsed.dt, "tz", None) is None:
             parsed = parsed.dt.tz_localize(VN_TZ, nonexistent="shift_forward", ambiguous="NaT")
         else:
@@ -180,13 +193,18 @@ def add_week_bucket(df: pd.DataFrame, date_column: str) -> pd.DataFrame:
 
 
 def manager_kpis(master_scope: pd.DataFrame, period_orders: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
-    columns = ["ASIN Manager", "Record >10 Orders", "Record >$1K", "Record >$3K", "Record >$5K", "Record >$10K", "New ASIN Sold", "New ASIN Revenue", "Sold Rate", "Total Revenue"]
+    columns = [
+        "ASIN Manager", "Record >10 Orders", "Record >$1K", "Record >$3K",
+        "Record >$5K", "Record >$10K", "New ASIN Sold", "New MRnD Sold",
+        "New Non-MRnD Sold", "New ASIN Revenue", "New MRnD Revenue",
+        "New Non-MRnD Revenue", "Sold Rate", "Total Revenue",
+    ]
     if master_scope.empty:
         return pd.DataFrame(columns=columns)
     order_agg = period_orders.groupby("asin", as_index=False).agg(
         revenue=("net_revenue", "sum"), orders=("order_id", "nunique")
     ) if not period_orders.empty else pd.DataFrame(columns=["asin", "revenue", "orders"])
-    portfolio = master_scope[["asin", "record_id", "asin_manager", "custom_check_done"]].drop_duplicates("asin").copy()
+    portfolio = master_scope[["asin", "record_id", "asin_manager", "custom_check_done", "mrnd"]].drop_duplicates("asin").copy()
     portfolio["record_key"] = portfolio["record_id"].where(portfolio["record_id"].ne(""), "ASIN:" + portfolio["asin"])
     portfolio = portfolio.merge(order_agg, on="asin", how="left")
     portfolio["revenue"] = pd.to_numeric(portfolio["revenue"], errors="coerce").fillna(0.0)
@@ -205,6 +223,8 @@ def manager_kpis(master_scope: pd.DataFrame, period_orders: pd.DataFrame, start_
         ) if not manager_orders.empty else pd.DataFrame(columns=["record_key", "revenue", "orders"])
         new = group[group["is_new"]]
         sold_new = new[new["orders"].gt(0)]
+        sold_new_mrnd = sold_new[sold_new["mrnd"]]
+        sold_new_non_mrnd = sold_new[~sold_new["mrnd"]]
         denominator = new["asin"].nunique()
         rows.append({
             "ASIN Manager": manager or "Chưa xác định",
@@ -214,7 +234,11 @@ def manager_kpis(master_scope: pd.DataFrame, period_orders: pd.DataFrame, start_
             "Record >$5K": int(record["revenue"].gt(5000).sum()),
             "Record >$10K": int(record["revenue"].gt(10000).sum()),
             "New ASIN Sold": sold_new["asin"].nunique(),
+            "New MRnD Sold": sold_new_mrnd["asin"].nunique(),
+            "New Non-MRnD Sold": sold_new_non_mrnd["asin"].nunique(),
             "New ASIN Revenue": sold_new["revenue"].sum(),
+            "New MRnD Revenue": sold_new_mrnd["revenue"].sum(),
+            "New Non-MRnD Revenue": sold_new_non_mrnd["revenue"].sum(),
             "Sold Rate": sold_new["asin"].nunique() / denominator if denominator else 0.0,
             "Total Revenue": group["revenue"].sum(),
         })

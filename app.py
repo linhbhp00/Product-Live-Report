@@ -114,7 +114,7 @@ def money(value: float) -> str:
 
 
 def kpi_row(items: list[tuple[str, str, str]]) -> None:
-    html = '<div class="kpis">' + "".join(
+    html = f'<div class="kpis" style="--kpi-count:{len(items)}">' + "".join(
         f'<div class="kpi"><small>{label}</small><strong>{value}</strong><em>{note}</em></div>'
         for label, value, note in items
     ) + "</div>"
@@ -132,7 +132,7 @@ st.markdown("""
 .hero h1{color:var(--navy)!important;font:800 34px/1.15 Manrope,sans-serif;margin:18px 0 7px}.hero p,.section-sub{color:var(--muted)}
 .section-title{color:var(--navy)!important;font:800 19px Manrope,sans-serif;margin:0}.section-sub{font-size:12px;margin:4px 0 14px}
 div[data-testid="stVerticalBlockBorderWrapper"]{border:1px solid var(--line);border-radius:14px;background:#fff}
-.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{padding:18px;border:1px solid var(--line);border-radius:12px;background:#fff;border-left:4px solid var(--orange)}
+.kpis{display:grid;grid-template-columns:repeat(var(--kpi-count),minmax(0,1fr));gap:12px}.kpi{padding:18px;border:1px solid var(--line);border-radius:12px;background:#fff;border-left:4px solid var(--orange)}
 .kpi small{color:var(--muted);font-weight:700}.kpi strong{display:block;font:800 25px Manrope,sans-serif;margin-top:8px}.kpi em{display:block;color:#9a7b59;font-size:10px;margin-top:6px;font-style:normal}
 [data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:10px;overflow:hidden}
 .stButton button[kind="primary"]{background:var(--orange);border-color:var(--orange);font-weight:800}
@@ -174,8 +174,17 @@ if is_admin:
         if st.button("Kiểm tra, thay thế & khóa Product Master", type="primary", disabled=not can_replace, width="stretch"):
             try:
                 cleaned_master = clean_master(read_upload(master_upload))
+                custom_done_count = int(cleaned_master["custom_check_done"].notna().sum())
+                if custom_done_count == 0:
+                    raise ValueError(
+                        "Không đọc được ngày nào từ cột Custom Check Done. "
+                        "Hãy kiểm tra file có cột này và dữ liệu ngày hợp lệ trước khi thay thế."
+                    )
                 result = replace_master(engine, cleaned_master, master_upload.name)
-                st.success(f"Đã khóa Product Master: {result['row_count']:,} ASIN hợp lệ.")
+                st.success(
+                    f"Đã khóa Product Master: {result['row_count']:,} ASIN hợp lệ · "
+                    f"{custom_done_count:,} ASIN có Custom Check Done."
+                )
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
@@ -267,19 +276,14 @@ with st.container(border=True):
 
 st.write("")
 with st.container(border=True):
-    chart_col, note_col = st.columns([1.25, 1])
-    with chart_col:
-        st.markdown('<p class="section-title">Revenue by MRnD & Store</p><p class="section-sub">Vòng ngoài: MRnD/Non-MRnD · vòng trong: WR/PAW thuộc MRnD.</p>', unsafe_allow_html=True)
-        if summary.empty:
-            chart_data = pd.DataFrame(columns=["MRnD", "Store", "net_revenue"])
-        else:
-            chart_data = summary[["mrnd", "store_display", "net_revenue"]].copy()
-            chart_data["MRnD"] = chart_data["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
-            chart_data["Store"] = chart_data["store_display"].replace("", "Chưa xác định")
-        double_donut(chart_data, "net_revenue")
-    with note_col:
-        st.markdown("#### Định nghĩa")
-        st.markdown("- Revenue = Item Price + Shipping Price.\n- Orders = Order ID duy nhất.\n- Wrappiness chỉ hiển thị là WR; Pawsionate chỉ hiển thị là PAW.\n- ASIN được trim + uppercase trước khi map.")
+    st.markdown('<p class="section-title">Revenue by MRnD & Store</p><p class="section-sub">Vòng ngoài: MRnD/Non-MRnD · vòng trong: WR/PAW thuộc MRnD.</p>', unsafe_allow_html=True)
+    if summary.empty:
+        chart_data = pd.DataFrame(columns=["MRnD", "Store", "net_revenue"])
+    else:
+        chart_data = summary[["mrnd", "store_display", "net_revenue"]].copy()
+        chart_data["MRnD"] = chart_data["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
+        chart_data["Store"] = chart_data["store_display"].replace("", "Chưa xác định")
+    double_donut(chart_data, "net_revenue")
 
 st.write("")
 with st.container(border=True):
@@ -315,6 +319,8 @@ with st.container(border=True):
     manager_table = manager_kpis(master_scope, period_orders, start_date, end_date)
     st.dataframe(manager_table, width="stretch", hide_index=True, column_config={
         "New ASIN Revenue": st.column_config.NumberColumn(format="USD %.2f"),
+        "New MRnD Revenue": st.column_config.NumberColumn(format="USD %.2f"),
+        "New Non-MRnD Revenue": st.column_config.NumberColumn(format="USD %.2f"),
         "Sold Rate": st.column_config.NumberColumn(format="%.1%%"),
         "Total Revenue": st.column_config.NumberColumn(format="USD %.2f"),
     })
@@ -340,6 +346,12 @@ with st.container(border=True):
     with l6:
         listing_mrnd = st.selectbox("MRnD", ["Tất cả", "MRnD", "Non-MRnD"], key="listing_mrnd")
 
+if not master.empty and valid_custom.empty:
+    st.warning(
+        "Product Master hiện chưa có ngày Custom Check Done hợp lệ. "
+        "Creator/Admin vui lòng upload lại file Product Master sau bản cập nhật này."
+    )
+
 listing_start, listing_end = date_pair(listing_dates)
 listing_scope = apply_filters(valid_custom, listing_query, listing_types, listing_managers, listing_stores, listing_mrnd)
 listing_scope = filter_dates(listing_scope, "custom_check_done", listing_start, listing_end).drop_duplicates("asin")
@@ -350,7 +362,6 @@ kpi_row([
     ("TOTAL CUSTOM DONE", f"{total_custom:,}", "Unique ASIN"),
     ("MRnD CUSTOM DONE", f"{mrnd_custom:,}", f"{mrnd_custom / total_custom if total_custom else 0:.1%} filtered"),
     ("NON-MRnD CUSTOM DONE", f"{non_custom:,}", f"{non_custom / total_custom if total_custom else 0:.1%} filtered"),
-    ("DATE RANGE", f"{pd.Timestamp(listing_start).strftime('%d/%m')}–{pd.Timestamp(listing_end).strftime('%d/%m')}", "Theo giờ Việt Nam"),
 ])
 
 st.write("")
