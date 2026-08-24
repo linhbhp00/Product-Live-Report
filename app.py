@@ -370,12 +370,12 @@ kpi_row([
 
 st.write("")
 with st.container(border=True):
-    st.markdown('<p class="section-title">Custom Done mix</p><p class="section-sub">Vòng ngoài denominator = toàn bộ filtered. Vòng trong denominator riêng = MRnD thuộc WR/PAW.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-title">Custom Done mix</p><p class="section-sub">Vòng ngoài denominator = toàn bộ filtered. Vòng trong denominator riêng = Non-MRnD thuộc WR/PAW.</p>', unsafe_allow_html=True)
     listing_chart = listing_scope[["asin", "mrnd", "store_display"]].copy()
     listing_chart["MRnD"] = listing_chart["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
     listing_chart["Store"] = listing_chart["store_display"]
     listing_chart["Count"] = 1
-    double_donut(listing_chart, "Count", count_mode=True)
+    double_donut(listing_chart, "Count", count_mode=True, inner_status="Non-MRnD")
 
 for title, person_column in [("Manage By", "asin_manager"), ("Custom By", "custom_by")]:
     st.write("")
