@@ -35,7 +35,12 @@ def sales_weekly_chart(orders: pd.DataFrame) -> None:
     st.caption("Tuần Thứ Hai-Chủ Nhật theo múi giờ Việt Nam; nhãn là ngày bắt đầu-kết thúc.")
 
 
-def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False) -> None:
+def double_donut(
+    data: pd.DataFrame,
+    value_column: str,
+    count_mode: bool = False,
+    inner_mrnd_only: bool = True,
+) -> None:
     if data.empty or data[value_column].sum() <= 0:
         st.info("Không có dữ liệu trong bộ lọc hiện tại.")
         return
@@ -54,7 +59,10 @@ def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False
         theta=alt.Theta(f"{value_column}:Q"),
         text=alt.Text("percent:Q", format=".1%"),
     )
-    inner = data[(data["MRnD"] == "MRnD") & data["Store"].isin(["WR", "PAW"])].groupby("Store", as_index=False)[value_column].sum()
+    inner_source = data[data["Store"].isin(["WR", "PAW"])]
+    if inner_mrnd_only:
+        inner_source = inner_source[inner_source["MRnD"] == "MRnD"]
+    inner = inner_source.groupby("Store", as_index=False)[value_column].sum()
     if inner.empty or inner[value_column].sum() <= 0:
         st.altair_chart((outer_arc + outer_text).properties(height=360), use_container_width=True)
         return
@@ -62,7 +70,11 @@ def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False
     inner["label"] = inner.apply(lambda row: f"{row['Store']} · {row['percent']:.1%}", axis=1)
     inner_arc = alt.Chart(inner).mark_arc(innerRadius=38, outerRadius=96, stroke="white", strokeWidth=2).encode(
         theta=alt.Theta(f"{value_column}:Q"),
-        color=alt.Color("label:N", scale=alt.Scale(range=["#e78024", "#5d82a3"]), title="MRnD: WR / PAW"),
+        color=alt.Color(
+            "label:N",
+            scale=alt.Scale(range=["#e78024", "#5d82a3"]),
+            title="MRnD: WR / PAW" if inner_mrnd_only else "Store: WR / PAW",
+        ),
         tooltip=["Store:N", alt.Tooltip(f"{value_column}:Q", format=value_format), alt.Tooltip("percent:Q", format=".1%")],
     )
     inner_text = alt.Chart(inner).mark_text(

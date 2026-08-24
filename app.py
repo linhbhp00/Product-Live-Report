@@ -280,14 +280,14 @@ with st.container(border=True):
 
 st.write("")
 with st.container(border=True):
-    st.markdown('<p class="section-title">Revenue by MRnD & Store</p><p class="section-sub">Vòng ngoài: MRnD/Non-MRnD · vòng trong: WR/PAW thuộc MRnD.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-title">Revenue by MRnD & Store</p><p class="section-sub">Vòng ngoài: MRnD/Non-MRnD · vòng trong: tổng Revenue WR/PAW.</p>', unsafe_allow_html=True)
     if summary.empty:
         chart_data = pd.DataFrame(columns=["MRnD", "Store", "net_revenue"])
     else:
         chart_data = summary[["mrnd", "store_display", "net_revenue"]].copy()
         chart_data["MRnD"] = chart_data["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
         chart_data["Store"] = chart_data["store_display"].replace("", "Chưa xác định")
-    double_donut(chart_data, "net_revenue")
+    double_donut(chart_data, "net_revenue", inner_mrnd_only=False)
 
 st.write("")
 with st.container(border=True):
