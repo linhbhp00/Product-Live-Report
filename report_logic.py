@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -87,11 +88,28 @@ def display_store(series: pd.Series) -> pd.Series:
 
 def parse_custom_done(series: pd.Series) -> pd.Series:
     """Parse CSV/Excel dates as Vietnam-local calendar values without double-localizing."""
-    numeric = pd.to_numeric(series, errors="coerce")
     output = pd.Series(pd.NaT, index=series.index, dtype=f"datetime64[ns, {VN_TZ}]")
-    epoch_ms = numeric.ge(10**11)
+    # Excel readers return genuine datetime/Timestamp objects. Converting those
+    # with `to_numeric` produces nanoseconds, which must not be mistaken for an
+    # epoch-millisecond value.
+    datetime_objects = series.notna() & series.map(
+        lambda value: isinstance(value, (pd.Timestamp, datetime, date))
+    )
+    if datetime_objects.any():
+        parsed_objects = pd.to_datetime(series.loc[datetime_objects], errors="coerce")
+        if getattr(parsed_objects.dt, "tz", None) is None:
+            parsed_objects = parsed_objects.dt.tz_localize(VN_TZ, nonexistent="shift_forward", ambiguous="NaT")
+        else:
+            parsed_objects = parsed_objects.dt.tz_convert(VN_TZ)
+        output.loc[datetime_objects] = parsed_objects
+
+    numeric = pd.to_numeric(series.where(~datetime_objects), errors="coerce")
+    epoch_ns = numeric.ge(10**17)
+    epoch_ms = numeric.ge(10**11) & numeric.lt(10**17)
     epoch_seconds = numeric.ge(10**9) & numeric.lt(10**11)
     excel_serial = numeric.between(20_000, 80_000, inclusive="both")
+    if epoch_ns.any():
+        output.loc[epoch_ns] = pd.to_datetime(numeric.loc[epoch_ns], unit="ns", errors="coerce", utc=True).dt.tz_convert(VN_TZ)
     if epoch_ms.any():
         output.loc[epoch_ms] = pd.to_datetime(numeric.loc[epoch_ms], unit="ms", errors="coerce", utc=True).dt.tz_convert(VN_TZ)
     if epoch_seconds.any():
@@ -101,8 +119,8 @@ def parse_custom_done(series: pd.Series) -> pd.Series:
             numeric.loc[excel_serial], unit="D", origin="1899-12-30", errors="coerce"
         ).dt.tz_localize(VN_TZ, nonexistent="shift_forward", ambiguous="NaT")
         output.loc[excel_serial] = parsed_excel
-    numeric_dates = epoch_ms | epoch_seconds | excel_serial
-    text_mask = ~numeric_dates & series.notna() & series.astype(str).str.strip().ne("")
+    numeric_dates = epoch_ns | epoch_ms | epoch_seconds | excel_serial
+    text_mask = ~datetime_objects & ~numeric_dates & series.notna() & series.astype(str).str.strip().ne("")
     if text_mask.any():
         # `format="mixed"` parses each cell independently. Lark/Excel exports
         # often mix date-only and date-time text in the same column.
