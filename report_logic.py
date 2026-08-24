@@ -75,14 +75,23 @@ def display_store(series: pd.Series) -> pd.Series:
 
 
 def parse_custom_done(series: pd.Series) -> pd.Series:
-    """Parse Lark/Excel dates as Vietnam-local calendar values without double-localizing."""
+    """Parse CSV/Excel dates as Vietnam-local calendar values without double-localizing."""
     numeric = pd.to_numeric(series, errors="coerce")
     output = pd.Series(pd.NaT, index=series.index, dtype=f"datetime64[ns, {VN_TZ}]")
-    # Lark may return epoch milliseconds.
-    epoch_mask = numeric.ge(10**11)
-    if epoch_mask.any():
-        output.loc[epoch_mask] = pd.to_datetime(numeric.loc[epoch_mask], unit="ms", errors="coerce", utc=True).dt.tz_convert(VN_TZ)
-    text_mask = ~epoch_mask & series.notna() & series.astype(str).str.strip().ne("")
+    epoch_ms = numeric.ge(10**11)
+    epoch_seconds = numeric.ge(10**9) & numeric.lt(10**11)
+    excel_serial = numeric.between(20_000, 80_000, inclusive="both")
+    if epoch_ms.any():
+        output.loc[epoch_ms] = pd.to_datetime(numeric.loc[epoch_ms], unit="ms", errors="coerce", utc=True).dt.tz_convert(VN_TZ)
+    if epoch_seconds.any():
+        output.loc[epoch_seconds] = pd.to_datetime(numeric.loc[epoch_seconds], unit="s", errors="coerce", utc=True).dt.tz_convert(VN_TZ)
+    if excel_serial.any():
+        parsed_excel = pd.to_datetime(
+            numeric.loc[excel_serial], unit="D", origin="1899-12-30", errors="coerce"
+        ).dt.tz_localize(VN_TZ, nonexistent="shift_forward", ambiguous="NaT")
+        output.loc[excel_serial] = parsed_excel
+    numeric_dates = epoch_ms | epoch_seconds | excel_serial
+    text_mask = ~numeric_dates & series.notna() & series.astype(str).str.strip().ne("")
     if text_mask.any():
         parsed = pd.to_datetime(series.loc[text_mask], errors="coerce")
         if getattr(parsed.dt, "tz", None) is None:

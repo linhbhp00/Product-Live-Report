@@ -10,15 +10,14 @@ import pandas as pd
 import streamlit as st
 
 from charts import double_donut, listing_weekly_chart, sales_weekly_chart
-from lark_client import fetch_lark_master, normalize_image_source
 from report_logic import VN_TZ, clean_master, clean_orders, filter_dates, manager_kpis, personnel_listing_table
-from storage import append_orders, create_storage, delete_batch, import_history, load_orders
+from storage import (
+    append_orders, create_storage, delete_batch, import_history, load_master, load_orders,
+    master_import_history, replace_master,
+)
 
 st.set_page_config(page_title="Product Live Report", page_icon="📈", layout="wide")
 ROOT = Path(__file__).parent
-APP_TOKEN = "RXnkbQ0NXaPKanshOEfjtNwjp7k"
-TABLE_ID = "tblgsIV71tjUvLlB"
-VIEW_ID = "vewuAjvYoo"
 
 
 def secrets(name: str) -> dict:
@@ -51,37 +50,6 @@ def db_url() -> str:
 @st.cache_resource
 def get_storage(url: str):
     return create_storage(url, ROOT)
-
-
-@st.cache_data
-def sample_master() -> pd.DataFrame:
-    return clean_master(pd.read_csv(ROOT / "product_master.csv"), normalize_image_source)
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def lark_master(settings: tuple[str, ...]) -> pd.DataFrame:
-    return fetch_lark_master(*settings)
-
-
-def get_master() -> tuple[pd.DataFrame, str]:
-    if "uploaded_master" in st.session_state:
-        data = st.session_state.uploaded_master
-        return data, f"Product Master upload · {len(data):,} ASIN"
-    section = secrets("lark")
-    settings = (
-        str(section.get("app_id") or os.getenv("LARK_APP_ID", "")),
-        str(section.get("app_secret") or os.getenv("LARK_APP_SECRET", "")),
-        str(section.get("app_token") or APP_TOKEN),
-        str(section.get("table_id") or TABLE_ID),
-        str(section.get("view_id") or VIEW_ID),
-    )
-    if settings[0] and settings[1]:
-        try:
-            data = lark_master(settings)
-            return data, f"Lark Base · {len(data):,} ASIN"
-        except Exception as exc:
-            return sample_master(), f"Lark lỗi · dữ liệu mẫu ({exc})"
-    return sample_master(), "Lark chưa cấu hình · dữ liệu mẫu"
 
 
 def valid_admin_password(value: str) -> bool:
@@ -171,7 +139,8 @@ div[data-testid="stVerticalBlockBorderWrapper"]{border:1px solid var(--line);bor
 
 is_admin = admin_login()
 engine, remote_storage = get_storage(db_url())
-master, master_source = get_master()
+master = load_master(engine)
+master_source = f"Product Master đã khóa · {len(master):,} ASIN" if not master.empty else "Chưa import Product Master"
 orders = load_orders(engine)
 
 st.markdown(f"""
@@ -184,22 +153,40 @@ if not remote_storage:
 
 if is_admin:
     with st.expander("↑ Import & quản lý dữ liệu (Admin)", expanded=False):
-        left, right = st.columns(2)
-        with left:
-            master_upload = st.file_uploader("Product Master (tùy chọn)", type=["csv", "xlsx", "xls"])
-            st.caption("Nếu bỏ trống, app tiếp tục dùng Product Master từ Lark Base.")
-        with right:
-            order_uploads = st.file_uploader(
-                "Order Report · chọn nhiều file", type=["txt", "tsv", "csv", "xlsx", "xls"],
-                accept_multiple_files=True,
-            )
-            st.caption("Timestamp: UTC → America/Los_Angeles → Asia/Ho_Chi_Minh.")
-        if st.button("Kiểm tra, append & khóa batch", type="primary", width="stretch"):
+        st.markdown("#### Product Master")
+        master_upload = st.file_uploader(
+            "Product Master · một file CSV/Excel", type=["csv", "xlsx", "xls"], key="master_upload"
+        )
+        st.caption("Upload mới sẽ thay thế toàn bộ Product Master hiện tại sau khi xác nhận; dữ liệu được khóa và lưu trong Supabase.")
+        replace_confirmed = st.checkbox(
+            "Tôi xác nhận thay thế Product Master hiện tại.",
+            value=False,
+            disabled=master.empty,
+            key="replace_master_confirmed",
+        )
+        can_replace = master_upload is not None and (master.empty or replace_confirmed)
+        if st.button("Kiểm tra, thay thế & khóa Product Master", type="primary", disabled=not can_replace, width="stretch"):
             try:
-                if master_upload is not None:
-                    st.session_state.uploaded_master = clean_master(read_upload(master_upload), normalize_image_source)
-                if not order_uploads:
-                    raise ValueError("Vui lòng chọn ít nhất một Order Report.")
+                cleaned_master = clean_master(read_upload(master_upload))
+                result = replace_master(engine, cleaned_master, master_upload.name)
+                st.success(f"Đã khóa Product Master: {result['row_count']:,} ASIN hợp lệ.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+        master_history = master_import_history(engine)
+        if not master_history.empty:
+            st.dataframe(master_history, width="stretch", hide_index=True)
+
+        st.divider()
+        st.markdown("#### Order Report")
+        order_uploads = st.file_uploader(
+            "Order Report · chọn nhiều file", type=["txt", "tsv", "csv", "xlsx", "xls"],
+            accept_multiple_files=True, key="order_uploads",
+        )
+        st.caption("Append và khóa theo batch. Timestamp: UTC → America/Los_Angeles → Asia/Ho_Chi_Minh.")
+        if st.button("Kiểm tra, append & khóa Order Report", type="primary", disabled=not order_uploads, width="stretch"):
+            try:
                 combined = pd.concat([clean_orders(read_upload(file)) for file in order_uploads], ignore_index=True)
                 combined = combined.drop_duplicates("row_hash")
                 result = append_orders(engine, combined, [file.name for file in order_uploads])
@@ -207,13 +194,9 @@ if is_admin:
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
-        if secrets("lark").get("app_id") and st.button("↻ Đồng bộ lại Product Master từ Lark"):
-            lark_master.clear()
-            st.session_state.pop("uploaded_master", None)
-            st.rerun()
 
         history = import_history(engine)
-        st.markdown("#### Import history")
+        st.markdown("#### Order import history")
         if history.empty:
             st.caption("Chưa có batch import.")
         else:
