@@ -47,10 +47,16 @@ def double_donut(
     value_format = ",.0f" if count_mode else ",.2f"
     outer = data.groupby("MRnD", as_index=False)[value_column].sum()
     outer["percent"] = outer[value_column] / outer[value_column].sum()
-    outer["label"] = outer.apply(lambda row: f"{row['MRnD']} · {row['percent']:.1%}", axis=1)
+    outer["outer_label"] = outer.apply(
+        lambda row: (
+            f"{row['MRnD']} · {row[value_column]:,.0f} · {row['percent']:.1%}"
+            if count_mode else f"{row['MRnD']} · {row['percent']:.1%}"
+        ),
+        axis=1,
+    )
     outer_arc = alt.Chart(outer).mark_arc(innerRadius=105, outerRadius=145, stroke="white", strokeWidth=2).encode(
         theta=alt.Theta(f"{value_column}:Q"),
-        color=alt.Color("label:N", scale=alt.Scale(range=[ORANGE, NAVY]), title="Tổng theo MRnD"),
+        color=alt.Color("outer_label:N", scale=alt.Scale(range=[ORANGE, NAVY]), title="Tổng theo MRnD"),
         tooltip=["MRnD:N", alt.Tooltip(f"{value_column}:Q", format=value_format), alt.Tooltip("percent:Q", format=".1%")],
     )
     outer_text = alt.Chart(outer).mark_text(
@@ -67,11 +73,17 @@ def double_donut(
         st.altair_chart((outer_arc + outer_text).properties(height=360), use_container_width=True)
         return
     inner["percent"] = inner[value_column] / inner[value_column].sum()
-    inner["label"] = inner.apply(lambda row: f"{row['Store']} · {row['percent']:.1%}", axis=1)
+    inner["inner_label"] = inner.apply(
+        lambda row: (
+            f"{row['Store']} · {row[value_column]:,.0f} · {row['percent']:.1%}"
+            if count_mode else f"{row['Store']} · {row['percent']:.1%}"
+        ),
+        axis=1,
+    )
     inner_arc = alt.Chart(inner).mark_arc(innerRadius=38, outerRadius=96, stroke="white", strokeWidth=2).encode(
         theta=alt.Theta(f"{value_column}:Q"),
         color=alt.Color(
-            "label:N",
+            "inner_label:N",
             scale=alt.Scale(range=["#e78024", "#5d82a3"]),
             title=f"{inner_status}: WR / PAW" if inner_status else "Store: WR / PAW",
         ),
@@ -84,7 +96,9 @@ def double_donut(
         text=alt.Text("percent:Q", format=".1%"),
     )
     st.altair_chart(
-        (inner_arc + inner_text + outer_arc + outer_text).resolve_scale(color="independent").properties(height=380),
+        alt.layer(outer_arc, outer_text, inner_arc, inner_text)
+        .resolve_scale(color="independent")
+        .properties(height=380),
         use_container_width=True,
     )
 
