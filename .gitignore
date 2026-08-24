@@ -1,0 +1,5 @@
+.smoke-deps/
+data/
+__pycache__/
+.streamlit/secrets.toml
+
