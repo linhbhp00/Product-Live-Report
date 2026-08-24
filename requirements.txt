@@ -4,3 +4,6 @@ openpyxl==3.1.5
 xlrd==2.0.2
 requests==2.34.2
 altair==5.5.0
+SQLAlchemy==2.0.43
+psycopg2-binary==2.9.10
+
