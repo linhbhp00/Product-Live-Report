@@ -2,670 +2,395 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-import json
+import hashlib
+import hmac
 import os
-import re
 
-import altair as alt
 import pandas as pd
-import requests
 import streamlit as st
 
+from charts import double_donut, listing_weekly_chart, sales_weekly_chart
+from lark_client import fetch_lark_master, normalize_image_source
+from report_logic import VN_TZ, clean_master, clean_orders, filter_dates, manager_kpis, personnel_listing_table
+from storage import append_orders, create_storage, delete_batch, import_history, load_orders
 
 st.set_page_config(page_title="Product Live Report", page_icon="📈", layout="wide")
-
 ROOT = Path(__file__).parent
-LARK_BASE_URL = "https://everlastify.jp.larksuite.com/base/RXnkbQ0NXaPKanshOEfjtNwjp7k?table=tblgsIV71tjUvLlB&view=vewuAjvYoo"
-LARK_APP_TOKEN = "RXnkbQ0NXaPKanshOEfjtNwjp7k"
-LARK_TABLE_ID = "tblgsIV71tjUvLlB"
-LARK_VIEW_ID = "vewuAjvYoo"
-
-MASTER_ALIASES = {
-    "record_id": ["record id", "record_id", "_record_id"],
-    "image": ["image", "image url", "image_url", "product image", "photo"],
-    "asin": ["asin"],
-    "sku": ["sku", "amz sku", "amz_sku"],
-    "product_name": ["product name", "product", "title"],
-    "product_type": ["product type", "type"],
-    "store": ["amz store", "amazon store", "store"],
-    "fulfill_by": ["fulfill by", "fulfillment", "fulfillment by"],
-    "asin_manager": ["owners", "asin manager", "product owner", "owner", "managed by", "manager"],
-    "mrnd": ["mrnd idea", "mrnd", "is mrnd", "is_mrnd"],
-    "listing_by": ["listing by", "listing_by"],
-    "custom_by": ["custom by", "custom_by"],
-    "status": ["status"],
-}
-
-ORDER_ALIASES = {
-    "order_date": ["order date", "date", "purchase date", "purchase-date"],
-    "order_id": ["order id", "amazon order id", "amazon-order-id"],
-    "order_status": ["order status", "order-status", "status"],
-    "item_status": ["item status", "item-status"],
-    "fulfillment_channel": ["fulfillment channel", "fulfillment-channel"],
-    "asin": ["asin"],
-    "qty": ["qty", "quantity", "quantity purchased"],
-    "item_price": ["item price", "product sales", "price"],
-    "shipping": ["shipping", "shipping price"],
-    "promotion": ["promotion", "promotion discount", "item promotion discount"],
-    "ship_promotion": ["ship promotion discount", "shipping promotion discount"],
-}
+APP_TOKEN = "RXnkbQ0NXaPKanshOEfjtNwjp7k"
+TABLE_ID = "tblgsIV71tjUvLlB"
+VIEW_ID = "vewuAjvYoo"
 
 
-def normalize_header(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(value).strip().lower()).strip()
-
-
-def standardize_columns(df: pd.DataFrame, aliases: dict[str, list[str]]) -> pd.DataFrame:
-    normalized = {normalize_header(column): column for column in df.columns}
-    exact = {str(column).strip().lower(): column for column in df.columns}
-    rename = {}
-    for target, candidates in aliases.items():
-        for candidate in candidates:
-            original = exact.get(str(candidate).strip().lower())
-            if original is None:
-                original = normalized.get(normalize_header(candidate))
-            if original is not None:
-                rename[original] = target
-                break
-    return df.rename(columns=rename)
+def secrets(name: str) -> dict:
+    try:
+        return dict(st.secrets.get(name, {}))
+    except Exception:
+        return {}
 
 
 def read_upload(file) -> pd.DataFrame:
-    suffix = Path(file.name).suffix.lower()
+    suffix, payload = Path(file.name).suffix.lower(), BytesIO(file.getvalue())
     if suffix == ".csv":
-        return pd.read_csv(file)
+        return pd.read_csv(payload)
     if suffix in {".txt", ".tsv"}:
-        return pd.read_csv(file, sep="\t")
+        return pd.read_csv(payload, sep="\t")
     if suffix in {".xlsx", ".xls"}:
-        return pd.read_excel(file)
-    raise ValueError("Chỉ hỗ trợ CSV, TXT/TSV, XLSX hoặc XLS.")
+        return pd.read_excel(payload)
+    raise ValueError(f"{file.name}: định dạng không được hỗ trợ.")
+
+
+def db_url() -> str:
+    value = str(secrets("database").get("url") or os.getenv("DATABASE_URL", ""))
+    if value.startswith("postgres://"):
+        return value.replace("postgres://", "postgresql+psycopg2://", 1)
+    if value.startswith("postgresql://") and "+psycopg2" not in value:
+        return value.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return value
+
+
+@st.cache_resource
+def get_storage(url: str):
+    return create_storage(url, ROOT)
 
 
 @st.cache_data
-def read_sample(name: str) -> pd.DataFrame:
-    return pd.read_csv(ROOT / name)
-
-
-def clean_master(raw: pd.DataFrame) -> pd.DataFrame:
-    df = standardize_columns(raw.copy(), MASTER_ALIASES)
-    if "asin" not in df:
-        raise ValueError("Product Master thiếu cột ASIN.")
-    for column in MASTER_ALIASES:
-        if column not in df:
-            df[column] = ""
-    df["asin"] = df["asin"].fillna("").astype(str).str.strip().str.upper()
-    df["record_id"] = df["record_id"].fillna("").astype(str).str.strip()
-    df["image"] = df["image"].map(normalize_image_source)
-    df["fulfill_by"] = df["fulfill_by"].fillna("").astype(str).str.strip().str.upper()
-    df = df[df["asin"].ne("") & ~df["fulfill_by"].eq("FBA")].drop_duplicates("asin", keep="last")
-    mrnd_text = df["mrnd"].fillna("").astype(str).str.strip().str.lower()
-    df["mrnd"] = ~mrnd_text.isin(["", "no", "false", "0", "0.0", "none", "nan", "n"])
-    store_text = df["store"].fillna("").astype(str).str.strip()
-    df["store"] = store_text.replace({"WR": "Wrappiness", "PAW": "Pawsionate"})
-    df["status"] = df["status"].fillna("Active").replace("", "Active")
-    return df[list(MASTER_ALIASES)]
-
-
-def clean_orders(raw: pd.DataFrame) -> pd.DataFrame:
-    df = standardize_columns(raw.copy(), ORDER_ALIASES)
-    required = ["order_date", "order_id", "asin"]
-    missing = [column for column in required if column not in df]
-    if missing:
-        raise ValueError("Order Report thiếu cột: " + ", ".join(missing))
-    for column in ORDER_ALIASES:
-        if column not in df:
-            df[column] = 0 if column in {"qty", "item_price", "shipping", "promotion", "ship_promotion"} else ""
-    df["asin"] = df["asin"].fillna("").astype(str).str.strip().str.upper()
-    df["order_id"] = df["order_id"].fillna("").astype(str).str.strip()
-    df["order_date"] = (
-        pd.to_datetime(df["order_date"], errors="coerce", utc=True)
-        .dt.tz_convert("America/Los_Angeles")
-        .dt.tz_localize(None)
-    )
-    for column in ["qty", "item_price", "shipping", "promotion", "ship_promotion"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
-    df["net_revenue"] = df["item_price"] + df["shipping"]
-    order_status = df["order_status"].fillna("").astype(str).str.strip().str.lower()
-    item_status = df["item_status"].fillna("").astype(str).str.strip().str.lower()
-    cancelled = order_status.isin(["cancelled", "canceled"]) | item_status.isin(["cancelled", "canceled"])
-    fulfillment = df["fulfillment_channel"].fillna("").astype(str).str.strip().str.lower()
-    fbm = fulfillment.eq("") | fulfillment.isin(["merchant", "fbm"])
-    return df.loc[~cancelled & fbm].dropna(subset=["order_date"])
-
-
-def load_default_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    return clean_master(read_sample("product_master.csv")), clean_orders(read_sample("order_report.csv"))
-
-
-def lark_settings() -> dict[str, str]:
-    try:
-        section = dict(st.secrets.get("lark", {}))
-    except Exception:
-        section = {}
-    return {
-        "app_id": str(section.get("app_id") or os.getenv("LARK_APP_ID", "")),
-        "app_secret": str(section.get("app_secret") or os.getenv("LARK_APP_SECRET", "")),
-        "app_token": str(section.get("app_token") or LARK_APP_TOKEN),
-        "table_id": str(section.get("table_id") or LARK_TABLE_ID),
-        "view_id": str(section.get("view_id") or LARK_VIEW_ID),
-    }
-
-
-def amazon_settings() -> dict[str, str]:
-    try:
-        section = dict(st.secrets.get("amazon", {}))
-    except Exception:
-        section = {}
-    return {
-        "access_token": str(section.get("access_token") or os.getenv("AMAZON_CREATORS_ACCESS_TOKEN", "")),
-        "partner_tag": str(section.get("partner_tag") or os.getenv("AMAZON_PARTNER_TAG", "")),
-        "marketplace": str(section.get("marketplace") or "www.amazon.com"),
-    }
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_amazon_images(asins: tuple[str, ...], access_token: str, partner_tag: str, marketplace: str) -> dict[str, str]:
-    images: dict[str, str] = {}
-    for offset in range(0, len(asins), 10):
-        item_ids = list(asins[offset:offset + 10])
-        response = requests.post(
-            "https://creatorsapi.amazon/catalog/v1/getItems",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-                "x-marketplace": marketplace,
-            },
-            json={
-                "itemIds": item_ids,
-                "itemIdType": "ASIN",
-                "marketplace": marketplace,
-                "partnerTag": partner_tag,
-                "resources": ["images.primary.medium"],
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        for item in response.json().get("itemsResult", {}).get("items", []):
-            source = item.get("images", {}).get("primary", {}).get("medium", {}).get("url", "")
-            if source:
-                images[str(item.get("asin", "")).upper()] = source
-    return images
-
-
-def flatten_lark_value(value):
-    if isinstance(value, list):
-        parts = [flatten_lark_value(item) for item in value]
-        return ", ".join(str(item) for item in parts if str(item).strip())
-    if isinstance(value, dict):
-        for key in ("name", "text", "display_name", "en_name", "link"):
-            if value.get(key):
-                return value[key]
-        return ", ".join(str(item) for item in value.values() if item not in (None, ""))
-    return "" if value is None else value
-
-
-def extract_lark_image(value) -> str:
-    """Prefer a browser-loadable URL from a Lark attachment value."""
-    if isinstance(value, list):
-        for item in value:
-            source = extract_lark_image(item)
-            if source:
-                return source
-        return ""
-    if isinstance(value, dict):
-        for key in ("url", "tmp_url", "link"):
-            source = normalize_image_source(value.get(key, ""))
-            if source:
-                return source
-        return ""
-    return normalize_image_source(value)
-
-
-def normalize_image_source(value) -> str:
-    """Return the first HTTP(S) or data-image source; ignore bare filenames."""
-    if value is None or (not isinstance(value, (list, dict)) and pd.isna(value)):
-        return ""
-    if isinstance(value, (list, dict)):
-        return extract_lark_image(value)
-    text = str(value).strip()
-    if not text:
-        return ""
-    if text.startswith("data:image/"):
-        return text
-    if text[:1] in "[{":
-        try:
-            return extract_lark_image(json.loads(text))
-        except (json.JSONDecodeError, TypeError):
-            pass
-    match = re.search(r"https?://[^\s,;\]\)}]+", text)
-    return match.group(0).rstrip("'\"") if match else ""
+def sample_master() -> pd.DataFrame:
+    return clean_master(pd.read_csv(ROOT / "product_master.csv"), normalize_image_source)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_lark_master(app_id: str, app_secret: str, app_token: str, table_id: str, view_id: str) -> pd.DataFrame:
-    token_response = requests.post(
-        "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal",
-        json={"app_id": app_id, "app_secret": app_secret},
-        timeout=20,
+def lark_master(settings: tuple[str, ...]) -> pd.DataFrame:
+    return fetch_lark_master(*settings)
+
+
+def get_master() -> tuple[pd.DataFrame, str]:
+    if "uploaded_master" in st.session_state:
+        data = st.session_state.uploaded_master
+        return data, f"Product Master upload · {len(data):,} ASIN"
+    section = secrets("lark")
+    settings = (
+        str(section.get("app_id") or os.getenv("LARK_APP_ID", "")),
+        str(section.get("app_secret") or os.getenv("LARK_APP_SECRET", "")),
+        str(section.get("app_token") or APP_TOKEN),
+        str(section.get("table_id") or TABLE_ID),
+        str(section.get("view_id") or VIEW_ID),
     )
-    token_response.raise_for_status()
-    token_payload = token_response.json()
-    token = token_payload.get("tenant_access_token")
-    if not token:
-        raise ValueError(token_payload.get("msg", "Không lấy được Lark access token."))
-
-    records, page_token = [], None
-    while True:
-        params = {"page_size": 500, "view_id": view_id}
-        if page_token:
-            params["page_token"] = page_token
-        response = requests.get(
-            f"https://open.larksuite.com/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records",
-            headers={"Authorization": f"Bearer {token}"},
-            params=params,
-            timeout=30,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if payload.get("code") != 0:
-            raise ValueError(payload.get("msg", "Không đọc được Lark Base."))
-        data = payload.get("data", {})
-        for item in data.get("items", []):
-            fields = dict(item.get("fields", {}))
-            fields.setdefault("Record ID", item.get("record_id", ""))
-            records.append(fields)
-        if not data.get("has_more"):
-            break
-        page_token = data.get("page_token")
-
-    normalized = [
-        {
-            key: extract_lark_image(value) if normalize_header(key) in {"image", "image url", "product image", "photo"}
-            else flatten_lark_value(value)
-            for key, value in record.items()
-        }
-        for record in records
-    ]
-    return clean_master(pd.DataFrame(normalized))
+    if settings[0] and settings[1]:
+        try:
+            data = lark_master(settings)
+            return data, f"Lark Base · {len(data):,} ASIN"
+        except Exception as exc:
+            return sample_master(), f"Lark lỗi · dữ liệu mẫu ({exc})"
+    return sample_master(), "Lark chưa cấu hình · dữ liệu mẫu"
 
 
-def initialize_state() -> None:
-    if "product_master" not in st.session_state:
-        sample_master, orders = load_default_data()
-        settings = lark_settings()
-        if settings["app_id"] and settings["app_secret"]:
-            try:
-                master = fetch_lark_master(**settings)
-                st.session_state.lark_connected = True
-                st.session_state.master_source = f"Lark Base · {len(master):,} ASIN"
-            except Exception as exc:
-                master = sample_master
-                st.session_state.lark_connected = False
-                st.session_state.master_source = f"Lark chưa kết nối · {exc}"
+def valid_admin_password(value: str) -> bool:
+    section = secrets("admin")
+    expected_hash = str(section.get("password_sha256") or "")
+    if expected_hash:
+        return hmac.compare_digest(hashlib.sha256(value.encode()).hexdigest(), expected_hash)
+    expected = str(section.get("password") or os.getenv("ADMIN_PASSWORD", ""))
+    return bool(expected) and hmac.compare_digest(value, expected)
+
+
+def admin_login() -> bool:
+    st.sidebar.markdown("### Quyền truy cập")
+    if st.session_state.get("is_admin"):
+        st.sidebar.success("Creator / Admin")
+        if st.sidebar.button("Đăng xuất"):
+            st.session_state.is_admin = False
+            st.rerun()
+        return True
+    st.sidebar.caption("Viewer · chỉ xem báo cáo")
+    configured = bool(secrets("admin").get("password") or secrets("admin").get("password_sha256") or os.getenv("ADMIN_PASSWORD"))
+    if not configured:
+        st.sidebar.warning("Chưa cấu hình mật khẩu admin.")
+        return False
+    password = st.sidebar.text_input("Mật khẩu creator", type="password")
+    if st.sidebar.button("Đăng nhập admin", width="stretch"):
+        if valid_admin_password(password):
+            st.session_state.is_admin = True
+            st.rerun()
         else:
-            master = sample_master
-            st.session_state.lark_connected = False
-            st.session_state.master_source = "Lark chưa cấu hình · đang dùng dữ liệu mẫu"
-        st.session_state.product_master = master
-        st.session_state.orders = orders
-        st.session_state.data_source = "Dữ liệu mẫu"
+            st.sidebar.error("Mật khẩu không đúng.")
+    return False
+
+
+def apply_filters(master: pd.DataFrame, query: str, types, managers, stores, mrnd: str) -> pd.DataFrame:
+    scope = master.copy()
+    if query:
+        needle = query.strip().lower()
+        scope = scope[scope[["sku", "asin", "product_name"]].fillna("").astype(str).apply(
+            lambda col: col.str.lower().str.contains(needle, regex=False)
+        ).any(axis=1)]
+    if types:
+        scope = scope[scope["product_type"].isin(types)]
+    if managers:
+        scope = scope[scope["asin_manager"].isin(managers)]
+    if stores:
+        scope = scope[scope["store_display"].isin(stores)]
+    if mrnd != "Tất cả":
+        scope = scope[scope["mrnd"].eq(mrnd == "MRnD")]
+    return scope
+
+
+def date_pair(value):
+    return value if isinstance(value, (tuple, list)) and len(value) == 2 else (value, value)
 
 
 def money(value: float) -> str:
-    return f"${value:,.2f}"
+    return "USD " + f"{value:,.2f}"
 
 
-def apply_import(master_file, order_file) -> None:
-    if order_file is None:
-        st.error("Vui lòng chọn Order Report.")
-        return
-    try:
-        if master_file is not None:
-            master = clean_master(read_upload(master_file))
-            st.session_state.product_master = master
-            st.session_state.lark_connected = False
-            st.session_state.master_source = f"Product Master upload · {len(master):,} ASIN"
-        orders = clean_orders(read_upload(order_file))
-        st.session_state.orders = orders
-        st.session_state.data_source = order_file.name
-        master_note = f" và {len(st.session_state.product_master):,} ASIN" if master_file is not None else ""
-        st.success(f"Đã import {len(orders):,} transaction{master_note}.")
-    except Exception as exc:
-        st.error(str(exc))
+def kpi_row(items: list[tuple[str, str, str]]) -> None:
+    html = '<div class="kpis">' + "".join(
+        f'<div class="kpi"><small>{label}</small><strong>{value}</strong><em>{note}</em></div>'
+        for label, value, note in items
+    ) + "</div>"
+    st.markdown(html, unsafe_allow_html=True)
 
 
-initialize_state()
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@700;800&display=swap');
+:root{--navy:#142b44;--orange:#f59a3d;--canvas:#f7f4ef;--muted:#718090;--line:#eadfd3}
+.stApp{background:var(--canvas);color:var(--navy);font-family:'DM Sans',sans-serif}
+[data-testid="stAppViewContainer"]>.main .block-container{max-width:1480px;padding:1.35rem 2.35rem 4rem}
+.appbar{background:#fff;margin:-1.35rem -2.35rem 1.75rem;padding:15px 2.35rem;display:flex;justify-content:space-between;border-bottom:1px solid var(--line)}
+.brand{font:800 18px Manrope,sans-serif}.sync{font-size:12px;color:var(--muted)}.sync b{color:var(--orange)}
+.hero h1{color:var(--navy)!important;font:800 34px/1.15 Manrope,sans-serif;margin:18px 0 7px}.hero p,.section-sub{color:var(--muted)}
+.section-title{color:var(--navy)!important;font:800 19px Manrope,sans-serif;margin:0}.section-sub{font-size:12px;margin:4px 0 14px}
+div[data-testid="stVerticalBlockBorderWrapper"]{border:1px solid var(--line);border-radius:14px;background:#fff}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.kpi{padding:18px;border:1px solid var(--line);border-radius:12px;background:#fff;border-left:4px solid var(--orange)}
+.kpi small{color:var(--muted);font-weight:700}.kpi strong{display:block;font:800 25px Manrope,sans-serif;margin-top:8px}.kpi em{display:block;color:#9a7b59;font-size:10px;margin-top:6px;font-style:normal}
+[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.stButton button[kind="primary"]{background:var(--orange);border-color:var(--orange);font-weight:800}
+@media(max-width:800px){.kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+""", unsafe_allow_html=True)
 
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@700;800&display=swap');
-    :root {
-        --navy:#142b44; --navy-2:#27445f; --orange:#f59a3d; --orange-soft:#fff0df;
-        --cream:#fffaf4; --canvas:#f7f4ef; --muted:#718090; --line:#eadfd3; --paper:#ffffff;
-    }
-    .stApp { background:var(--canvas); color:var(--navy); font-family:'DM Sans',sans-serif; }
-    [data-testid="stHeader"] { background:rgba(247,244,239,.92); }
-    [data-testid="stAppViewContainer"] > .main .block-container { max-width:1480px; padding:1.35rem 2.35rem 4rem; }
-    .appbar {
-        background:var(--paper); color:var(--navy); margin:-1.35rem -2.35rem 1.75rem; padding:15px 2.35rem;
-        display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line);
-        box-shadow:0 4px 20px rgba(20,43,68,.05);
-    }
-    .brand { display:flex; align-items:center; gap:12px; font-family:Manrope,sans-serif; font-weight:800; letter-spacing:-.2px; }
-    .brand-badge { display:grid; place-items:center; width:34px; height:34px; border-radius:10px; color:white; background:var(--orange); box-shadow:0 6px 14px rgba(245,154,61,.28); }
-    .sync { font-size:12px; color:var(--muted); } .sync b { color:var(--orange); }
-    .hero { display:flex; justify-content:space-between; align-items:end; margin-bottom:1.25rem; padding:4px 2px; }
-    .eyebrow { color:var(--orange); font-size:11px; font-weight:800; letter-spacing:1.8px; }
-    .hero h1 { color:var(--navy) !important; font:800 34px/1.15 Manrope,sans-serif; margin:7px 0 6px; letter-spacing:-1.2px; }
-    .hero p { color:var(--muted); margin:0; font-size:14px; }
-    div[data-testid="stVerticalBlockBorderWrapper"] { border:1px solid var(--line); border-radius:14px; background:white; box-shadow:0 10px 30px rgba(20,43,68,.055); }
-    .section-title { color:var(--navy) !important; font:800 18px Manrope,sans-serif; margin:0; }
-    .section-sub { color:var(--muted); font-size:12px; margin:4px 0 14px; }
-    .kpi-side-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:13px; margin-top:31px; }
-    .kpi-card {
-        position:relative; overflow:hidden; min-height:122px; padding:18px 19px 16px; background:var(--paper);
-        border:1px solid var(--line); border-radius:14px; box-shadow:0 7px 22px rgba(20,43,68,.06);
-    }
-    .kpi-card::before { content:''; position:absolute; left:0; top:0; bottom:0; width:4px; background:var(--orange); }
-    .kpi-card.primary { background:linear-gradient(135deg,#fff 0%,var(--orange-soft) 145%); }
-    .kpi-label { display:block; color:#6d7b88; font-size:11px; font-weight:800; letter-spacing:.8px; text-transform:uppercase; }
-    .kpi-value { display:block; color:var(--navy) !important; font:800 27px/1.12 Manrope,sans-serif; letter-spacing:-.8px; margin-top:13px; opacity:1 !important; }
-    .kpi-note { display:block; color:#9a7b59; font-size:10px; margin-top:8px; }
-    [data-testid="stMetricValue"], [data-testid="stMetricValue"] * { color:var(--navy) !important; opacity:1 !important; }
-    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * { color:var(--muted) !important; opacity:1 !important; }
-    .quality { display:flex; flex-wrap:wrap; gap:18px; font-size:11px; color:var(--muted); padding:8px 0 0; }
-    .quality b { color:var(--navy); }
-    .quality .ok::before,.quality .warn::before { content:''; width:7px; height:7px; display:inline-block; border-radius:50%; margin-right:6px; }
-    .quality .ok::before { background:#49a978; } .quality .warn::before { background:var(--orange); }
-    [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
-    .stButton button[kind="primary"] { background:var(--orange); border-color:var(--orange); color:white; font-weight:800; }
-    .stButton button[kind="primary"]:hover { background:#e88626; border-color:#e88626; }
-    .stButton button, .stDownloadButton button, .stLinkButton a { border-radius:9px; }
-    [data-baseweb="select"] > div, [data-baseweb="input"] > div { border-color:#dfd4c9 !important; }
-    [data-baseweb="select"] > div, [data-baseweb="input"] > div, [data-testid="stTextInput"] input {
-        background:#fff !important; color:var(--navy) !important;
-    }
-    [data-testid="stAlert"] { background:var(--orange-soft) !important; color:var(--navy) !important; border-color:#f7c98f !important; }
-    [data-testid="stAlert"] * { color:var(--navy) !important; opacity:1 !important; }
-    hr { border-color:var(--line) !important; }
-    @media(max-width:980px){ .kpi-side-grid{grid-template-columns:repeat(2,1fr);margin-top:12px} .kpi-card.primary{grid-column:auto} }
-    @media(max-width:700px){
-        [data-testid="stAppViewContainer"] > .main .block-container{padding:1rem .75rem 3rem}
-        .appbar{margin:-1rem -.75rem 1.2rem;padding:13px .9rem}.sync{display:none}.hero h1{font-size:28px}
-        .kpi-side-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:10px 0 4px}
-        .kpi-card,.kpi-card.primary{grid-column:auto;min-height:106px;padding:15px 13px 13px}
-        .kpi-card:last-child{grid-column:auto}.kpi-value{font-size:22px}.kpi-label{font-size:10px}
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+is_admin = admin_login()
+engine, remote_storage = get_storage(db_url())
+master, master_source = get_master()
+orders = load_orders(engine)
 
-st.markdown(
-    f"""
-    <div class="appbar"><div class="brand"><span class="brand-badge">P</span>Product Live Report</div>
-    <div class="sync"><b>●</b>&nbsp; {st.session_state.master_source}</div></div>
-    <div class="hero"><div><div class="eyebrow">PERFORMANCE OVERVIEW</div><h1>Sales performance</h1>
-    <p>Order Report được map với Product Master bằng ASIN.</p></div></div>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown(f"""
+<div class="appbar"><div class="brand">📈 Product Live Report</div><div class="sync"><b>●</b>&nbsp; {master_source}</div></div>
+<div class="hero"><h1>Sales performance</h1><p>Order Report map Product Master bằng ASIN; lịch báo cáo dùng múi giờ Việt Nam.</p></div>
+""", unsafe_allow_html=True)
 
-with st.expander("↑  Import dữ liệu", expanded=False):
-    left, right = st.columns(2)
-    with left:
-        master_upload = st.file_uploader(
-            "Product Master từ Lark Base",
-            type=["csv", "xlsx", "xls"],
-            help="File export của bảng TOTAL ASINs / view All",
-        )
-        st.caption("Cần: ASIN. Tự nhận Record ID, Image, AMZ SKU, Product Name, Product Type, Managed By, MRnD Idea, Listing By và Custom By.")
-    with right:
-        order_upload = st.file_uploader(
-            "Order Report",
-            type=["txt", "tsv", "csv", "xlsx", "xls"],
-            help="Amazon Order Report theo ngày",
-        )
-        st.caption("Purchase Time được đổi sang America/Los_Angeles; tự loại Cancelled/Canceled và fulfillment Amazon (FBA).")
-    if st.button("Kiểm tra & import", type="primary", use_container_width=True):
-        apply_import(master_upload, order_upload)
+if not remote_storage:
+    st.warning("Storage hiện là local fallback. Production cần DATABASE_URL trong Streamlit Secrets để dữ liệu không mất khi restart.")
 
-settings = lark_settings()
-if settings["app_id"] and settings["app_secret"]:
-    if st.button("↻  Đồng bộ lại Product Master từ Lark"):
-        try:
-            fetch_lark_master.clear()
-            synced_master = fetch_lark_master(**settings)
-            st.session_state.product_master = synced_master
-            st.session_state.lark_connected = True
-            st.session_state.master_source = f"Lark Base · {len(synced_master):,} ASIN"
-            st.success(f"Đã đồng bộ {len(synced_master):,} ASIN từ TOTAL ASINs.")
+if is_admin:
+    with st.expander("↑ Import & quản lý dữ liệu (Admin)", expanded=False):
+        left, right = st.columns(2)
+        with left:
+            master_upload = st.file_uploader("Product Master (tùy chọn)", type=["csv", "xlsx", "xls"])
+            st.caption("Nếu bỏ trống, app tiếp tục dùng Product Master từ Lark Base.")
+        with right:
+            order_uploads = st.file_uploader(
+                "Order Report · chọn nhiều file", type=["txt", "tsv", "csv", "xlsx", "xls"],
+                accept_multiple_files=True,
+            )
+            st.caption("Timestamp: UTC → America/Los_Angeles → Asia/Ho_Chi_Minh.")
+        if st.button("Kiểm tra, append & khóa batch", type="primary", width="stretch"):
+            try:
+                if master_upload is not None:
+                    st.session_state.uploaded_master = clean_master(read_upload(master_upload), normalize_image_source)
+                if not order_uploads:
+                    raise ValueError("Vui lòng chọn ít nhất một Order Report.")
+                combined = pd.concat([clean_orders(read_upload(file)) for file in order_uploads], ignore_index=True)
+                combined = combined.drop_duplicates("row_hash")
+                result = append_orders(engine, combined, [file.name for file in order_uploads])
+                st.success(f"Đã khóa batch: thêm {result['row_count']:,} dòng; bỏ qua {result['skipped_duplicates']:,} dòng trùng.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+        if secrets("lark").get("app_id") and st.button("↻ Đồng bộ lại Product Master từ Lark"):
+            lark_master.clear()
+            st.session_state.pop("uploaded_master", None)
             st.rerun()
-        except Exception as exc:
-            st.error(f"Không thể đồng bộ Lark: {exc}")
+
+        history = import_history(engine)
+        st.markdown("#### Import history")
+        if history.empty:
+            st.caption("Chưa có batch import.")
+        else:
+            st.dataframe(history, width="stretch", hide_index=True)
+            batch = st.selectbox(
+                "Batch cần xóa", history["Batch ID"],
+                format_func=lambda value: f"{value[:8]} · {history.loc[history['Batch ID'].eq(value), 'Files'].iloc[0]}",
+            )
+            confirmed = st.checkbox("Tôi hiểu thao tác này xóa toàn bộ transaction trong batch đã khóa.")
+            if st.button("Xóa batch", disabled=not confirmed):
+                st.success(f"Đã xóa {delete_batch(engine, batch):,} transaction.")
+                st.rerun()
 else:
-    st.info("App đã cố định Product Master vào bảng TOTAL ASINs. Hãy cấu hình LARK_APP_ID và LARK_APP_SECRET trong Streamlit Secrets để bật đồng bộ trực tiếp.")
+    st.caption("Viewer: dữ liệu đã khóa; chỉ creator/admin có quyền import, chỉnh sửa hoặc xóa.")
 
-master = st.session_state.product_master.copy()
-orders = st.session_state.orders.copy()
 known_asins = set(master["asin"])
-orders["mapped"] = orders["asin"].isin(known_asins)
-mapped_orders = orders[orders["mapped"]].copy()
-
-if mapped_orders.empty:
-    st.warning("Không có transaction nào map được với Product Master.")
-    st.stop()
-
-minimum, maximum = mapped_orders["order_date"].min().date(), mapped_orders["order_date"].max().date()
+orders["mapped"] = orders["asin"].isin(known_asins) if not orders.empty else pd.Series(dtype=bool)
+mapped_orders = orders[orders["mapped"]].copy() if not orders.empty else orders.copy()
+today = pd.Timestamp.now(tz=VN_TZ).date()
+minimum = mapped_orders["order_date"].min().date() if not mapped_orders.empty else today
+maximum = mapped_orders["order_date"].max().date() if not mapped_orders.empty else today
 
 with st.container(border=True):
-    st.markdown('<p class="section-title">Bộ lọc báo cáo</p><p class="section-sub">KPI và bảng được tính lại từ transaction gốc.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-title">Bộ lọc Sale Performance</p><p class="section-sub">Date filter áp dụng trên ngày Việt Nam sau timezone conversion.</p>', unsafe_allow_html=True)
     f1, f2, f3, f4, f5, f6 = st.columns([1.35, 1.1, 1, 1, .9, .75])
     with f1:
-        query = st.text_input("Tìm kiếm", placeholder="SKU, ASIN hoặc Product Name")
+        query = st.text_input("Tìm kiếm", placeholder="SKU, ASIN hoặc Product Name", key="sale_query")
     with f2:
-        date_range = st.date_input("Khoảng thời gian", value=(minimum, maximum), min_value=minimum, max_value=maximum)
+        date_range = st.date_input("Khoảng thời gian", value=(minimum, maximum), key="sale_dates")
     with f3:
-        type_options = sorted(master["product_type"].dropna().astype(str).loc[lambda x: x.ne("")].unique())
-        selected_types = st.multiselect("Product Type", type_options, placeholder="Tất cả loại")
+        selected_types = st.multiselect("Product Type", sorted(x for x in master["product_type"].unique() if x), key="sale_types")
     with f4:
-        manager_options = sorted(master["asin_manager"].dropna().astype(str).loc[lambda x: x.ne("")].unique())
-        selected_managers = st.multiselect("ASIN Manager", manager_options, placeholder="Tất cả quản lý")
+        selected_managers = st.multiselect("ASIN Manager", sorted(x for x in master["asin_manager"].unique() if x), key="sale_managers")
     with f5:
-        store_options = sorted(master["store"].dropna().astype(str).loc[lambda x: x.ne("")].unique())
-        selected_stores = st.multiselect("Store", store_options, placeholder="Tất cả store")
+        selected_stores = st.multiselect("Store", sorted(x for x in master["store_display"].unique() if x), key="sale_stores")
     with f6:
-        mrnd_filter = st.selectbox("MRnD", ["Tất cả", "MRnD", "Non-MRnD"])
+        mrnd_filter = st.selectbox("MRnD", ["Tất cả", "MRnD", "Non-MRnD"], key="sale_mrnd")
 
-if isinstance(date_range, tuple) and len(date_range) == 2:
-    start_date, end_date = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
-else:
-    start_date = end_date = pd.Timestamp(date_range)
-
-master_scope = master.copy()
-if query:
-    needle = query.strip().lower()
-    master_scope = master_scope[
-        master_scope[["sku", "asin", "product_name"]].fillna("").astype(str).apply(
-            lambda column: column.str.lower().str.contains(needle, regex=False)
-        ).any(axis=1)
-    ]
-if selected_types:
-    master_scope = master_scope[master_scope["product_type"].isin(selected_types)]
-if selected_managers:
-    master_scope = master_scope[master_scope["asin_manager"].isin(selected_managers)]
-if selected_stores:
-    master_scope = master_scope[master_scope["store"].isin(selected_stores)]
-if mrnd_filter != "Tất cả":
-    master_scope = master_scope[master_scope["mrnd"].eq(mrnd_filter == "MRnD")]
-
-period_orders = mapped_orders[mapped_orders["order_date"].between(start_date, end_date + pd.Timedelta(days=1), inclusive="left")]
+start_date, end_date = date_pair(date_range)
+master_scope = apply_filters(master, query, selected_types, selected_managers, selected_stores, mrnd_filter)
+period_orders = filter_dates(mapped_orders, "order_date", start_date, end_date)
+period_orders = period_orders[period_orders["asin"].isin(set(master_scope["asin"]))]
 summary = (
     period_orders.groupby("asin", as_index=False)
     .agg(net_revenue=("net_revenue", "sum"), orders=("order_id", "nunique"), qty=("qty", "sum"))
     .merge(master_scope, on="asin", how="inner")
-)
-total_asin = master_scope.loc[~master_scope["status"].astype(str).str.lower().eq("inactive"), "asin"].nunique()
-asin_sold = summary["asin"].nunique()
+) if not period_orders.empty else pd.DataFrame()
 
+total_asin = master_scope.loc[~master_scope["status"].str.lower().eq("inactive"), "asin"].nunique()
+asin_sold = summary["asin"].nunique() if not summary.empty else 0
+kpi_row([
+    ("REVENUE", money(summary["net_revenue"].sum() if not summary.empty else 0), "Item Price + Shipping"),
+    ("ORDERS", f"{summary['orders'].sum() if not summary.empty else 0:,.0f}", "Unique Order ID"),
+    ("ASIN SOLD", f"{asin_sold:,}", "Có sale trong kỳ"),
+    ("TOTAL ASIN", f"{total_asin:,}", "ASIN active theo filter"),
+])
+
+st.write("")
 with st.container(border=True):
-    chart_data = summary[["mrnd", "store", "net_revenue"]].copy()
-    chart_data["MRnD"] = chart_data["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
-    chart_data["Store"] = chart_data["store"].replace("", "Chưa xác định")
-    total_revenue = chart_data["net_revenue"].sum()
-    chart_col, kpi_col = st.columns([1.18, 1], gap="large")
+    st.markdown('<p class="section-title">Sale Performance theo tuần Việt Nam</p><p class="section-sub">Revenue = cột · Orders = đường.</p>', unsafe_allow_html=True)
+    sales_weekly_chart(period_orders)
 
+st.write("")
+with st.container(border=True):
+    chart_col, note_col = st.columns([1.25, 1])
     with chart_col:
-        st.markdown('<p class="section-title">Revenue by MRnD & Store</p>', unsafe_allow_html=True)
-        st.markdown('<p class="section-sub">Vòng ngoài: MRnD / Non-MRnD · Vòng trong: Wrappiness / Pawsionate của từng nhóm</p>', unsafe_allow_html=True)
-        if total_revenue > 0:
-            outer = chart_data.groupby("MRnD", as_index=False)["net_revenue"].sum()
-            outer["sort_order"] = outer["MRnD"].map({"MRnD": 0, "Non-MRnD": 1})
-            outer["percent"] = outer["net_revenue"] / total_revenue
-            outer["legend"] = outer.apply(lambda row: f"{row['MRnD']} · {row['percent']:.1%}", axis=1)
-            outer["arc_label"] = outer["percent"].map(lambda value: f"{value:.1%}" if value >= .025 else "")
-            outer = outer.sort_values("sort_order")
-
-            inner = chart_data.groupby(["MRnD", "Store"], as_index=False)["net_revenue"].sum()
-            inner["detail"] = inner["MRnD"] + " · " + inner["Store"]
-            detail_order = {
-                "MRnD · Wrappiness": 0, "MRnD · Pawsionate": 1,
-                "MRnD · Chưa xác định": 2, "Non-MRnD · Wrappiness": 3,
-                "Non-MRnD · Pawsionate": 4, "Non-MRnD · Chưa xác định": 5,
-            }
-            detail_colors = {
-                "MRnD · Wrappiness": "#e78024", "MRnD · Pawsionate": "#ffc477",
-                "MRnD · Chưa xác định": "#ffe0b2", "Non-MRnD · Wrappiness": "#1d3d5a",
-                "Non-MRnD · Pawsionate": "#5d82a3", "Non-MRnD · Chưa xác định": "#a9bfd2",
-            }
-            inner["sort_order"] = inner["detail"].map(detail_order).fillna(99)
-            inner["percent"] = inner["net_revenue"] / total_revenue
-            inner["legend"] = inner.apply(lambda row: f"{row['detail']} · {row['percent']:.1%}", axis=1)
-            inner["arc_label"] = inner["percent"].map(lambda value: f"{value:.1%}" if value >= .025 else "")
-            inner = inner.sort_values("sort_order")
-
-            outer_domain = outer["legend"].tolist()
-            outer_range = ["#f59a3d" if label.startswith("MRnD ·") else "#27445f" for label in outer_domain]
-            inner_domain = inner["legend"].tolist()
-            inner_range = [detail_colors.get(detail, "#9aa8b5") for detail in inner["detail"]]
-
-            outer_arc = alt.Chart(outer).mark_arc(innerRadius=104, outerRadius=142, stroke="white", strokeWidth=2).encode(
-                theta=alt.Theta("net_revenue:Q", stack=True),
-                order=alt.Order("sort_order:Q", sort="ascending"),
-                color=alt.Color("legend:N", scale=alt.Scale(domain=outer_domain, range=outer_range), title="MRnD / Non-MRnD"),
-                tooltip=[alt.Tooltip("MRnD:N"), alt.Tooltip("net_revenue:Q", title="Revenue", format="$,.2f"), alt.Tooltip("percent:Q", title="Tỷ trọng", format=".1%")],
-            )
-            outer_text = alt.Chart(outer).mark_text(radius=122, color="white", fontSize=12, fontWeight="bold").encode(
-                theta=alt.Theta("net_revenue:Q", stack=True), order=alt.Order("sort_order:Q", sort="ascending"), text="arc_label:N"
-            )
-            inner_arc = alt.Chart(inner).mark_arc(innerRadius=37, outerRadius=95, stroke="white", strokeWidth=2).encode(
-                theta=alt.Theta("net_revenue:Q", stack=True),
-                order=alt.Order("sort_order:Q", sort="ascending"),
-                color=alt.Color("legend:N", scale=alt.Scale(domain=inner_domain, range=inner_range), title="Store trong từng nhóm"),
-                tooltip=[alt.Tooltip("detail:N", title="Nhóm · Store"), alt.Tooltip("net_revenue:Q", title="Revenue", format="$,.2f"), alt.Tooltip("percent:Q", title="Tỷ trọng", format=".1%")],
-            )
-            inner_text = alt.Chart(inner).mark_text(radius=67, color="white", fontSize=11, fontWeight="bold").encode(
-                theta=alt.Theta("net_revenue:Q", stack=True), order=alt.Order("sort_order:Q", sort="ascending"), text="arc_label:N"
-            )
-            revenue_chart = (inner_arc + inner_text + outer_arc + outer_text).resolve_scale(color="independent").properties(height=390)
-            st.altair_chart(revenue_chart, use_container_width=True)
+        st.markdown('<p class="section-title">Revenue by MRnD & Store</p><p class="section-sub">Vòng ngoài: MRnD/Non-MRnD · vòng trong: WR/PAW thuộc MRnD.</p>', unsafe_allow_html=True)
+        if summary.empty:
+            chart_data = pd.DataFrame(columns=["MRnD", "Store", "net_revenue"])
         else:
-            st.info("Không có revenue trong bộ lọc hiện tại.")
-
-    with kpi_col:
-        st.markdown(
-            f"""
-            <div class="kpi-side-grid">
-              <div class="kpi-card primary">
-                <span class="kpi-label">Revenue</span>
-                <span class="kpi-value">{money(summary['net_revenue'].sum())}</span>
-                <span class="kpi-note">Item Price + Shipping Price</span>
-              </div>
-              <div class="kpi-card">
-                <span class="kpi-label">Orders</span>
-                <span class="kpi-value">{summary['orders'].sum():,.0f}</span>
-                <span class="kpi-note">Đơn hàng duy nhất</span>
-              </div>
-              <div class="kpi-card">
-                <span class="kpi-label">ASIN Sold</span>
-                <span class="kpi-value">{asin_sold:,}</span>
-                <span class="kpi-note">Có sale trong kỳ</span>
-              </div>
-              <div class="kpi-card">
-                <span class="kpi-label">Total ASIN</span>
-                <span class="kpi-value">{total_asin:,}</span>
-                <span class="kpi-note">ASIN đang hoạt động</span>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            chart_data = summary[["mrnd", "store_display", "net_revenue"]].copy()
+            chart_data["MRnD"] = chart_data["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
+            chart_data["Store"] = chart_data["store_display"].replace("", "Chưa xác định")
+        double_donut(chart_data, "net_revenue")
+    with note_col:
+        st.markdown("#### Định nghĩa")
+        st.markdown("- Revenue = Item Price + Shipping Price.\n- Orders = Order ID duy nhất.\n- Wrappiness chỉ hiển thị là WR; Pawsionate chỉ hiển thị là PAW.\n- ASIN được trim + uppercase trước khi map.")
 
 st.write("")
 with st.container(border=True):
     h1, h2, h3 = st.columns([2, 1, .75])
     with h1:
-        st.markdown('<p class="section-title">Product performance</p>', unsafe_allow_html=True)
-        st.markdown(f'<p class="section-sub">Hiển thị {len(summary):,} sản phẩm đã map ASIN</p>', unsafe_allow_html=True)
+        st.markdown('<p class="section-title">Product Performance</p><p class="section-sub">Hỗ trợ A→Z/Z→A và lớn→nhỏ/nhỏ→lớn.</p>', unsafe_allow_html=True)
     with h2:
-        sort_column = st.selectbox("Sắp xếp theo", ["Revenue", "Orders", "Qty", "Product Name", "Product Type", "ASIN Manager", "Store"], label_visibility="collapsed")
+        sort_column = st.selectbox("Sắp xếp", ["Revenue", "Orders", "Qty", "Product Name", "Product Type", "ASIN Manager", "Store"], label_visibility="collapsed")
     with h3:
-        direction = st.selectbox("Thứ tự", ["Giảm dần", "Tăng dần"], label_visibility="collapsed")
-
-    sort_map = {
-        "Revenue": "net_revenue", "Orders": "orders", "Qty": "qty", "Product Name": "product_name",
-        "Product Type": "product_type", "ASIN Manager": "asin_manager", "Store": "store",
-    }
-    summary = summary.sort_values(sort_map[sort_column], ascending=direction == "Tăng dần", na_position="last")
-    if "amazon_images" not in st.session_state:
-        st.session_state.amazon_images = {}
-    summary["image"] = summary.apply(
-        lambda row: row["image"] or st.session_state.amazon_images.get(row["asin"], ""), axis=1
-    )
-    missing_images = summary.loc[summary["image"].eq(""), "asin"].drop_duplicates().tolist()
-    amazon = amazon_settings()
-    if missing_images and amazon["access_token"] and amazon["partner_tag"]:
-        if st.button("↻  Lấy ảnh Amazon cho 100 ASIN tiếp theo"):
-            try:
-                with st.spinner("Đang lấy ảnh chính thức từ Amazon..."):
-                    found = fetch_amazon_images(tuple(missing_images[:100]), **amazon)
-                st.session_state.amazon_images.update(found)
-                st.success(f"Đã bổ sung {len(found):,} ảnh Amazon.")
-                st.rerun()
-            except Exception as exc:
-                st.warning(f"Chưa lấy được ảnh Amazon: {exc}")
-    elif missing_images:
-        st.caption("Ảnh trống có thể tự bổ sung bằng Amazon Creators API. Cấu hình access token và partner tag trong Streamlit Secrets.")
-    display = summary[["image", "record_id", "product_name", "sku", "asin", "product_type", "store", "asin_manager", "mrnd", "listing_by", "custom_by", "net_revenue", "orders", "qty"]].copy()
-    display["mrnd"] = display["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
+        direction = st.selectbox("Thứ tự", ["Giảm dần / Z→A", "Tăng dần / A→Z"], label_visibility="collapsed")
+    sort_map = {"Revenue": "net_revenue", "Orders": "orders", "Qty": "qty", "Product Name": "product_name", "Product Type": "product_type", "ASIN Manager": "asin_manager", "Store": "store_display"}
+    if not summary.empty:
+        summary = summary.sort_values(sort_map[sort_column], ascending=direction.startswith("Tăng"), na_position="last")
+        display = summary[["image", "record_id", "product_name", "sku", "asin", "product_type", "store_display", "asin_manager", "mrnd", "listing_by", "custom_by", "net_revenue", "orders", "qty"]].copy()
+        display["mrnd"] = display["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
+    else:
+        display = pd.DataFrame(columns=range(14))
     display.columns = ["Image", "Record ID", "Product Name", "SKU", "ASIN", "Product Type", "Store", "ASIN Manager", "MRnD", "Listing By", "Custom By", "Revenue", "Orders", "Qty"]
-    st.dataframe(
-        display,
-        use_container_width=True,
-        hide_index=True,
-        height=min(620, 48 + max(len(display), 5) * 36),
-        column_config={
-            "Image": st.column_config.ImageColumn("Image", width="small"),
-            "Record ID": st.column_config.TextColumn("Record ID", width="medium"),
-            "Revenue": st.column_config.NumberColumn(format="$%.2f"),
-            "Orders": st.column_config.NumberColumn(format="%d"),
-            "Qty": st.column_config.NumberColumn(format="%.0f"),
-        },
-    )
-    mapped_count = int(orders["mapped"].sum())
-    unmapped_count = int((~orders["mapped"]).sum())
-    st.markdown(f'<div class="quality"><span class="ok">Mapped: <b>{mapped_count:,}</b></span><span class="warn">Chưa map: <b>{unmapped_count:,}</b></span><span>Mapping rate: <b>{mapped_count / len(orders):.1%}</b></span></div>', unsafe_allow_html=True)
+    st.dataframe(display, width="stretch", hide_index=True, height=min(620, 80 + max(len(display), 5) * 35), column_config={
+        "Image": st.column_config.ImageColumn("Image", width="small"),
+        "Revenue": st.column_config.NumberColumn(format="USD %.2f"),
+        "Orders": st.column_config.NumberColumn(format="%d"),
+    })
+    mapped_count = int(orders["mapped"].sum()) if not orders.empty else 0
+    unmapped_count = int((~orders["mapped"]).sum()) if not orders.empty else 0
+    rate = mapped_count / len(orders) if len(orders) else 0
+    st.caption(f"Mapped: {mapped_count:,} · Chưa map: {unmapped_count:,} · Mapping rate: {rate:.1%}")
+    st.download_button("⇩ Xuất CSV", display.to_csv(index=False).encode("utf-8-sig"), "product-live-report.csv", "text/csv")
 
-    export = display.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("⇩  Xuất CSV", data=export, file_name="product-live-report.csv", mime="text/csv")
+st.write("")
+with st.container(border=True):
+    st.markdown('<p class="section-title">KPI theo Manage By / ASIN Manager</p><p class="section-sub">Aggregate ASIN → Record ID trước khi áp ngưỡng. New dựa trên Custom Check Done trong khoảng đang xem.</p>', unsafe_allow_html=True)
+    manager_table = manager_kpis(master_scope, period_orders, start_date, end_date)
+    st.dataframe(manager_table, width="stretch", hide_index=True, column_config={
+        "New ASIN Revenue": st.column_config.NumberColumn(format="USD %.2f"),
+        "Sold Rate": st.column_config.NumberColumn(format="%.1%%"),
+        "Total Revenue": st.column_config.NumberColumn(format="USD %.2f"),
+    })
 
-with st.expander("Data model & cohort roadmap"):
-    st.markdown(
-        """
-        **Product Master:** upload file export của bảng `TOTAL ASINs` / view `All`, hoặc đồng bộ API khi được cấp quyền. `Managed By → ASIN Manager`, `MRnD Idea → MRnD`; `Record ID`, `Image`, `Listing By` và `Custom By` lấy trực tiếp theo ASIN. Ảnh sẽ hiển thị khi trường `Image` chứa URL có thể truy cập.
+st.markdown('<div class="hero"><h1>Listings Performance</h1><p>Phân tích Product Master theo Custom Check Done, độc lập với Order Date.</p></div>', unsafe_allow_html=True)
+valid_custom = master.dropna(subset=["custom_check_done"]).copy()
+listing_min = valid_custom["custom_check_done"].min().date() if not valid_custom.empty else today
+listing_max = valid_custom["custom_check_done"].max().date() if not valid_custom.empty else today
 
-        **Order Report:** chỉ lưu transaction theo ngày. `Purchase Time` được đổi từ UTC sang `America/Los_Angeles`; `Revenue = Item Price + Shipping Price`. Đơn `Cancelled/Canceled` và fulfillment `Amazon/FBA` được loại.
-        **Cohort D7/D14/D30:** thêm `Live Date` vào Product Master, tính tuổi listing từ `Order Date - Live Date`, rồi nhóm doanh thu theo ngày tuổi.
-        """
-    )
+with st.container(border=True):
+    st.markdown('<p class="section-title">Bộ lọc Listings Performance</p><p class="section-sub">Mọi KPI/chart dưới đây dùng Custom Check Done làm trường thời gian chính.</p>', unsafe_allow_html=True)
+    l1, l2, l3, l4, l5, l6 = st.columns([1.35, 1.1, 1, 1, .9, .75])
+    with l1:
+        listing_query = st.text_input("Tìm kiếm", placeholder="SKU, ASIN hoặc Product Name", key="listing_query")
+    with l2:
+        listing_dates = st.date_input("Custom Check Done", value=(listing_min, listing_max), key="listing_dates")
+    with l3:
+        listing_types = st.multiselect("Product Type", sorted(x for x in master["product_type"].unique() if x), key="listing_types")
+    with l4:
+        listing_managers = st.multiselect("Manage By", sorted(x for x in master["asin_manager"].unique() if x), key="listing_managers")
+    with l5:
+        listing_stores = st.multiselect("Store", sorted(x for x in master["store_display"].unique() if x), key="listing_stores")
+    with l6:
+        listing_mrnd = st.selectbox("MRnD", ["Tất cả", "MRnD", "Non-MRnD"], key="listing_mrnd")
+
+listing_start, listing_end = date_pair(listing_dates)
+listing_scope = apply_filters(valid_custom, listing_query, listing_types, listing_managers, listing_stores, listing_mrnd)
+listing_scope = filter_dates(listing_scope, "custom_check_done", listing_start, listing_end).drop_duplicates("asin")
+total_custom = listing_scope["asin"].nunique()
+mrnd_custom = listing_scope.loc[listing_scope["mrnd"], "asin"].nunique()
+non_custom = listing_scope.loc[~listing_scope["mrnd"], "asin"].nunique()
+kpi_row([
+    ("TOTAL CUSTOM DONE", f"{total_custom:,}", "Unique ASIN"),
+    ("MRnD CUSTOM DONE", f"{mrnd_custom:,}", f"{mrnd_custom / total_custom if total_custom else 0:.1%} filtered"),
+    ("NON-MRnD CUSTOM DONE", f"{non_custom:,}", f"{non_custom / total_custom if total_custom else 0:.1%} filtered"),
+    ("DATE RANGE", f"{pd.Timestamp(listing_start).strftime('%d/%m')}–{pd.Timestamp(listing_end).strftime('%d/%m')}", "Theo giờ Việt Nam"),
+])
+
+st.write("")
+with st.container(border=True):
+    st.markdown('<p class="section-title">Custom Done mix</p><p class="section-sub">Vòng ngoài denominator = toàn bộ filtered. Vòng trong denominator riêng = MRnD thuộc WR/PAW.</p>', unsafe_allow_html=True)
+    listing_chart = listing_scope[["asin", "mrnd", "store_display"]].copy()
+    listing_chart["MRnD"] = listing_chart["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
+    listing_chart["Store"] = listing_chart["store_display"]
+    listing_chart["Count"] = 1
+    double_donut(listing_chart, "Count", count_mode=True)
+
+for title, person_column in [("Manage By", "asin_manager"), ("Custom By", "custom_by")]:
+    st.write("")
+    with st.container(border=True):
+        st.markdown(f'<p class="section-title">{title}</p><p class="section-sub">Trái: Custom Done tuần stacked MRnD/Non-MRnD. Phải: chi tiết nhân sự.</p>', unsafe_allow_html=True)
+        chart_col, table_col = st.columns([1.45, 1], gap="large")
+        with chart_col:
+            listing_weekly_chart(listing_scope, person_column)
+        with table_col:
+            st.dataframe(personnel_listing_table(listing_scope, person_column), width="stretch", hide_index=True, column_config={
+                "MRnD Rate": st.column_config.NumberColumn(format="%.1%%")
+            })
+
+with st.expander("Chú thích metric & cấu hình"):
+    st.markdown("""
+- Timezone Sale: UTC-aware → America/Los_Angeles → Asia/Ho_Chi_Minh; không localize lại timestamp đã có timezone.
+- Tuần Việt Nam: Thứ Hai–Chủ Nhật; bucket hiển thị đủ range kể cả tháng không trọn vẹn.
+- Record KPI: nhiều ASIN chung Record ID được cộng Revenue/Orders trước ngưỡng; các ngưỡng dùng dấu lớn hơn.
+- Sold Rate: ASIN mới có sale / tổng ASIN mới; mới được xác định bằng Custom Check Done thuộc khoảng chọn.
+- Persistence: production cần database.url trong Secrets; local SQLite chỉ là fallback phát triển.
+""")
+
