@@ -48,9 +48,15 @@ def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False
         color=alt.Color("label:N", scale=alt.Scale(range=[ORANGE, NAVY]), title="Tổng theo MRnD"),
         tooltip=["MRnD:N", alt.Tooltip(f"{value_column}:Q", format=value_format), alt.Tooltip("percent:Q", format=".1%")],
     )
+    outer_text = alt.Chart(outer).mark_text(
+        radius=125, fontSize=12, fontWeight="bold", color="white"
+    ).encode(
+        theta=alt.Theta(f"{value_column}:Q"),
+        text=alt.Text("percent:Q", format=".1%"),
+    )
     inner = data[(data["MRnD"] == "MRnD") & data["Store"].isin(["WR", "PAW"])].groupby("Store", as_index=False)[value_column].sum()
     if inner.empty or inner[value_column].sum() <= 0:
-        st.altair_chart(outer_arc.properties(height=360), use_container_width=True)
+        st.altair_chart((outer_arc + outer_text).properties(height=360), use_container_width=True)
         return
     inner["percent"] = inner[value_column] / inner[value_column].sum()
     inner["label"] = inner.apply(lambda row: f"{row['Store']} · {row['percent']:.1%}", axis=1)
@@ -59,8 +65,14 @@ def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False
         color=alt.Color("label:N", scale=alt.Scale(range=["#e78024", "#5d82a3"]), title="MRnD: WR / PAW"),
         tooltip=["Store:N", alt.Tooltip(f"{value_column}:Q", format=value_format), alt.Tooltip("percent:Q", format=".1%")],
     )
+    inner_text = alt.Chart(inner).mark_text(
+        radius=67, fontSize=11, fontWeight="bold", color="white"
+    ).encode(
+        theta=alt.Theta(f"{value_column}:Q"),
+        text=alt.Text("percent:Q", format=".1%"),
+    )
     st.altair_chart(
-        (inner_arc + outer_arc).resolve_scale(color="independent").properties(height=380),
+        (inner_arc + inner_text + outer_arc + outer_text).resolve_scale(color="independent").properties(height=380),
         use_container_width=True,
     )
 
