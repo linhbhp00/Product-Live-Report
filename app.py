@@ -196,10 +196,14 @@ if is_admin:
         st.divider()
         st.markdown("#### Order Report")
         order_uploads = st.file_uploader(
-            "Order Report · chọn nhiều file", type=["txt", "tsv", "csv", "xlsx", "xls"],
+            "Order Report · chọn nhiều file (mỗi store một file)", type=["txt", "tsv", "csv", "xlsx", "xls"],
             accept_multiple_files=True, key="order_uploads",
         )
-        st.caption("Append và khóa theo batch. Timestamp: UTC → America/Los_Angeles → Asia/Ho_Chi_Minh.")
+        st.caption(
+            "Chọn đồng thời các file WR, PAW hoặc store khác; app tự gộp để tính report "
+            "và khóa toàn bộ danh sách file trong cùng một batch. Timestamp: UTC → "
+            "America/Los_Angeles → Asia/Ho_Chi_Minh."
+        )
         if st.button("Kiểm tra, append & khóa Order Report", type="primary", disabled=not order_uploads, width="stretch"):
             try:
                 combined = pd.concat([clean_orders(read_upload(file)) for file in order_uploads], ignore_index=True)
