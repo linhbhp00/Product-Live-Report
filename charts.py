@@ -35,7 +35,12 @@ def sales_weekly_chart(orders: pd.DataFrame) -> None:
     st.caption("Tuần Thứ Hai-Chủ Nhật theo múi giờ Việt Nam; nhãn là ngày bắt đầu-kết thúc.")
 
 
-def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False) -> None:
+def double_donut(
+    data: pd.DataFrame,
+    value_column: str,
+    count_mode: bool = False,
+    inner_status: str | None = "MRnD",
+) -> None:
     if data.empty or data[value_column].sum() <= 0:
         st.info("Không có dữ liệu trong bộ lọc hiện tại.")
         return
@@ -54,7 +59,10 @@ def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False
         theta=alt.Theta(f"{value_column}:Q"),
         text=alt.Text("percent:Q", format=".1%"),
     )
-    inner = data[(data["MRnD"] == "MRnD") & data["Store"].isin(["WR", "PAW"])].groupby("Store", as_index=False)[value_column].sum()
+    inner_source = data[data["Store"].isin(["WR", "PAW"])]
+    if inner_status is not None:
+        inner_source = inner_source[inner_source["MRnD"] == inner_status]
+    inner = inner_source.groupby("Store", as_index=False)[value_column].sum()
     if inner.empty or inner[value_column].sum() <= 0:
         st.altair_chart((outer_arc + outer_text).properties(height=360), use_container_width=True)
         return
@@ -62,7 +70,11 @@ def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False
     inner["label"] = inner.apply(lambda row: f"{row['Store']} · {row['percent']:.1%}", axis=1)
     inner_arc = alt.Chart(inner).mark_arc(innerRadius=38, outerRadius=96, stroke="white", strokeWidth=2).encode(
         theta=alt.Theta(f"{value_column}:Q"),
-        color=alt.Color("label:N", scale=alt.Scale(range=["#e78024", "#5d82a3"]), title="MRnD: WR / PAW"),
+        color=alt.Color(
+            "label:N",
+            scale=alt.Scale(range=["#e78024", "#5d82a3"]),
+            title=f"{inner_status}: WR / PAW" if inner_status else "Store: WR / PAW",
+        ),
         tooltip=["Store:N", alt.Tooltip(f"{value_column}:Q", format=value_format), alt.Tooltip("percent:Q", format=".1%")],
     )
     inner_text = alt.Chart(inner).mark_text(
@@ -85,13 +97,26 @@ def listing_weekly_chart(scope: pd.DataFrame, person_column: str) -> None:
     work = add_week_bucket(work, "custom_check_done")
     work["MRnD Status"] = work["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
     weekly = work.groupby(["week_start", "week_label", "MRnD Status"], as_index=False)["asin"].nunique().rename(columns={"asin": "Custom Done"}).sort_values("week_start")
+    weekly["Status Order"] = weekly["MRnD Status"].map({"Non-MRnD": 0, "MRnD": 1})
+    weekly = weekly.sort_values(["week_start", "Status Order"])
+    weekly["Stack Start"] = weekly.groupby("week_label")["Custom Done"].cumsum() - weekly["Custom Done"]
+    weekly["Label Position"] = weekly["Stack Start"] + weekly["Custom Done"] / 2
     order = weekly["week_label"].drop_duplicates().tolist()
     chart = alt.Chart(weekly).mark_bar().encode(
         x=alt.X("week_label:N", sort=order, title="Tuần Việt Nam"),
         y=alt.Y("Custom Done:Q", title="Count Custom Done", stack="zero"),
         color=alt.Color("MRnD Status:N", scale=alt.Scale(domain=["MRnD", "Non-MRnD"], range=[ORANGE, NAVY])),
+        order=alt.Order("Status Order:Q", sort="ascending"),
         tooltip=["week_label:N", "MRnD Status:N", "Custom Done:Q"],
-    ).properties(height=330)
-    st.altair_chart(chart, use_container_width=True)
+    )
+    labels = alt.Chart(weekly).mark_text(
+        color="white", fontWeight="bold", fontSize=12, baseline="middle"
+    ).encode(
+        x=alt.X("week_label:N", sort=order),
+        y=alt.Y("Label Position:Q"),
+        text=alt.Text("Custom Done:Q", format=".0f"),
+        tooltip=["week_label:N", "MRnD Status:N", "Custom Done:Q"],
+    )
+    st.altair_chart((chart + labels).properties(height=330), use_container_width=True)
     st.caption("Đếm unique ASIN có Custom Check Done; tuần Thứ Hai-Chủ Nhật theo giờ Việt Nam.")
 
