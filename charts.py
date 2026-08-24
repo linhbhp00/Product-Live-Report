@@ -28,7 +28,10 @@ def sales_weekly_chart(orders: pd.DataFrame) -> None:
     line = base.mark_line(color=NAVY, point=True, strokeWidth=3).encode(
         y=alt.Y("Orders:Q", title="Orders", axis=alt.Axis(orient="right")), tooltip=["week_label:N", "Orders:Q"]
     )
-    st.altair_chart((bars + line).resolve_scale(y="independent").properties(height=340), width="stretch")
+    st.altair_chart(
+        (bars + line).resolve_scale(y="independent").properties(height=340),
+        use_container_width=True,
+    )
     st.caption("Tuần Thứ Hai-Chủ Nhật theo múi giờ Việt Nam; nhãn là ngày bắt đầu-kết thúc.")
 
 
@@ -47,7 +50,7 @@ def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False
     )
     inner = data[(data["MRnD"] == "MRnD") & data["Store"].isin(["WR", "PAW"])].groupby("Store", as_index=False)[value_column].sum()
     if inner.empty or inner[value_column].sum() <= 0:
-        st.altair_chart(outer_arc.properties(height=360), width="stretch")
+        st.altair_chart(outer_arc.properties(height=360), use_container_width=True)
         return
     inner["percent"] = inner[value_column] / inner[value_column].sum()
     inner["label"] = inner.apply(lambda row: f"{row['Store']} · {row['percent']:.1%}", axis=1)
@@ -56,7 +59,10 @@ def double_donut(data: pd.DataFrame, value_column: str, count_mode: bool = False
         color=alt.Color("label:N", scale=alt.Scale(range=["#e78024", "#5d82a3"]), title="MRnD: WR / PAW"),
         tooltip=["Store:N", alt.Tooltip(f"{value_column}:Q", format=value_format), alt.Tooltip("percent:Q", format=".1%")],
     )
-    st.altair_chart((inner_arc + outer_arc).resolve_scale(color="independent").properties(height=380), width="stretch")
+    st.altair_chart(
+        (inner_arc + outer_arc).resolve_scale(color="independent").properties(height=380),
+        use_container_width=True,
+    )
 
 
 def listing_weekly_chart(scope: pd.DataFrame, person_column: str) -> None:
@@ -74,6 +80,6 @@ def listing_weekly_chart(scope: pd.DataFrame, person_column: str) -> None:
         color=alt.Color("MRnD Status:N", scale=alt.Scale(domain=["MRnD", "Non-MRnD"], range=[ORANGE, NAVY])),
         tooltip=["week_label:N", "MRnD Status:N", "Custom Done:Q"],
     ).properties(height=330)
-    st.altair_chart(chart, width="stretch")
+    st.altair_chart(chart, use_container_width=True)
     st.caption("Đếm unique ASIN có Custom Check Done; tuần Thứ Hai-Chủ Nhật theo giờ Việt Nam.")
 
