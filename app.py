@@ -280,14 +280,14 @@ with st.container(border=True):
 
 st.write("")
 with st.container(border=True):
-    st.markdown('<p class="section-title">Revenue by MRnD & Store</p><p class="section-sub">Vòng ngoài: MRnD/Non-MRnD · vòng trong: tổng Revenue WR/PAW.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-title">Revenue by MRnD & Store</p><p class="section-sub">Vòng ngoài: MRnD/Non-MRnD · vòng trong: Non-MRnD của WR/PAW.</p>', unsafe_allow_html=True)
     if summary.empty:
         chart_data = pd.DataFrame(columns=["MRnD", "Store", "net_revenue"])
     else:
         chart_data = summary[["mrnd", "store_display", "net_revenue"]].copy()
         chart_data["MRnD"] = chart_data["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
         chart_data["Store"] = chart_data["store_display"].replace("", "Chưa xác định")
-    double_donut(chart_data, "net_revenue", inner_mrnd_only=False)
+    double_donut(chart_data, "net_revenue", inner_status="Non-MRnD")
 
 st.write("")
 with st.container(border=True):
@@ -336,18 +336,16 @@ listing_max = valid_custom["custom_check_done"].max().date() if not valid_custom
 
 with st.container(border=True):
     st.markdown('<p class="section-title">Bộ lọc Listings Performance</p><p class="section-sub">Mọi KPI/chart dưới đây dùng Custom Check Done làm trường thời gian chính.</p>', unsafe_allow_html=True)
-    l1, l2, l3, l4, l5, l6 = st.columns([1.35, 1.1, 1, 1, .9, .75])
+    l1, l2, l3, l4, l5 = st.columns([1.2, 1, 1, .9, .75])
     with l1:
-        listing_query = st.text_input("Tìm kiếm", placeholder="SKU, ASIN hoặc Product Name", key="listing_query")
-    with l2:
         listing_dates = st.date_input("Custom Check Done", value=(listing_min, listing_max), key="listing_dates")
-    with l3:
-        listing_types = st.multiselect("Product Type", sorted(x for x in master["product_type"].unique() if x), key="listing_types")
-    with l4:
+    with l2:
         listing_managers = st.multiselect("Manage By", sorted(x for x in master["asin_manager"].unique() if x), key="listing_managers")
-    with l5:
+    with l3:
+        listing_custom_by = st.multiselect("Custom By", sorted(x for x in master["custom_by"].unique() if x), key="listing_custom_by")
+    with l4:
         listing_stores = st.multiselect("Store", sorted(x for x in master["store_display"].unique() if x), key="listing_stores")
-    with l6:
+    with l5:
         listing_mrnd = st.selectbox("MRnD", ["Tất cả", "MRnD", "Non-MRnD"], key="listing_mrnd")
 
 if not master.empty and valid_custom.empty:
@@ -357,7 +355,9 @@ if not master.empty and valid_custom.empty:
     )
 
 listing_start, listing_end = date_pair(listing_dates)
-listing_scope = apply_filters(valid_custom, listing_query, listing_types, listing_managers, listing_stores, listing_mrnd)
+listing_scope = apply_filters(valid_custom, "", [], listing_managers, listing_stores, listing_mrnd)
+if listing_custom_by:
+    listing_scope = listing_scope[listing_scope["custom_by"].isin(listing_custom_by)]
 listing_scope = filter_dates(listing_scope, "custom_check_done", listing_start, listing_end).drop_duplicates("asin")
 total_custom = listing_scope["asin"].nunique()
 mrnd_custom = listing_scope.loc[listing_scope["mrnd"], "asin"].nunique()
