@@ -210,43 +210,59 @@ def add_week_bucket(df: pd.DataFrame, date_column: str) -> pd.DataFrame:
     return result
 
 
+def new_asin_bounds(end_date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Return the VN-time window from day 20 of the prior month through this month end."""
+    anchor = pd.Timestamp(end_date)
+    if anchor.tzinfo is not None:
+        anchor = anchor.tz_convert(VN_TZ).tz_localize(None)
+    month_start = anchor.normalize().replace(day=1)
+    new_start = (month_start - pd.DateOffset(months=1)).replace(day=20).tz_localize(VN_TZ)
+    new_end_exclusive = (month_start + pd.DateOffset(months=1)).tz_localize(VN_TZ)
+    return new_start, new_end_exclusive
+
+
 def manager_kpis(master_scope: pd.DataFrame, period_orders: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
     columns = [
-        "ASIN Manager", "Record >10 Orders", "Record >$1K", "Record >$3K",
+        "ASIN Manager", "Record >10 Unit Sales", "Record >$1K", "Record >$3K",
         "Record >$5K", "Record >$10K", "New ASIN Sold", "New MRnD Sold",
         "New Non-MRnD Sold", "New ASIN Revenue", "New MRnD Revenue",
-        "New Non-MRnD Revenue", "Sold Rate", "Total Revenue",
+        "New Non-MRnD Revenue", "Sold Rate", "Total ASIN Sold", "Total MRnD Sold",
+        "Total Non-MRnD Sold", "Total ASIN Revenue", "Total MRnD Revenue",
+        "Total Non-MRnD Revenue",
     ]
     if master_scope.empty:
         return pd.DataFrame(columns=columns)
     order_agg = period_orders.groupby("asin", as_index=False).agg(
-        revenue=("net_revenue", "sum"), orders=("order_id", "nunique")
-    ) if not period_orders.empty else pd.DataFrame(columns=["asin", "revenue", "orders"])
+        revenue=("net_revenue", "sum"), units=("qty", "sum")
+    ) if not period_orders.empty else pd.DataFrame(columns=["asin", "revenue", "units"])
     portfolio = master_scope[["asin", "record_id", "asin_manager", "custom_check_done", "mrnd"]].drop_duplicates("asin").copy()
     portfolio["record_key"] = portfolio["record_id"].where(portfolio["record_id"].ne(""), "ASIN:" + portfolio["asin"])
     portfolio = portfolio.merge(order_agg, on="asin", how="left")
     portfolio["revenue"] = pd.to_numeric(portfolio["revenue"], errors="coerce").fillna(0.0)
-    portfolio["orders"] = pd.to_numeric(portfolio["orders"], errors="coerce").fillna(0).astype(int)
-    start, end_exclusive = vn_bounds(start_date, end_date)
-    portfolio["is_new"] = portfolio["custom_check_done"].ge(start) & portfolio["custom_check_done"].lt(end_exclusive)
+    portfolio["units"] = pd.to_numeric(portfolio["units"], errors="coerce").fillna(0.0)
+    new_start, new_end_exclusive = new_asin_bounds(end_date)
+    portfolio["is_new"] = portfolio["custom_check_done"].ge(new_start) & portfolio["custom_check_done"].lt(new_end_exclusive)
     rows = []
     for manager, group in portfolio.groupby("asin_manager", dropna=False):
-        # Count each Order ID once per Record ID, even when several ASINs in that
-        # record occur in the same Amazon order.
+        # Several ASINs can share a Record ID. Sum all Qty/Unit Sales for the
+        # record before applying the >10 threshold.
         manager_orders = period_orders[period_orders["asin"].isin(set(group["asin"]))].merge(
             group[["asin", "record_key"]], on="asin", how="inner"
         )
         record = manager_orders.groupby("record_key", as_index=False).agg(
-            revenue=("net_revenue", "sum"), orders=("order_id", "nunique")
-        ) if not manager_orders.empty else pd.DataFrame(columns=["record_key", "revenue", "orders"])
+            revenue=("net_revenue", "sum"), units=("qty", "sum")
+        ) if not manager_orders.empty else pd.DataFrame(columns=["record_key", "revenue", "units"])
         new = group[group["is_new"]]
-        sold_new = new[new["orders"].gt(0)]
+        sold_new = new[new["units"].gt(0)]
         sold_new_mrnd = sold_new[sold_new["mrnd"]]
         sold_new_non_mrnd = sold_new[~sold_new["mrnd"]]
+        sold_total = group[group["units"].gt(0)]
+        sold_total_mrnd = sold_total[sold_total["mrnd"]]
+        sold_total_non_mrnd = sold_total[~sold_total["mrnd"]]
         denominator = new["asin"].nunique()
         rows.append({
             "ASIN Manager": manager or "Chưa xác định",
-            "Record >10 Orders": int(record["orders"].gt(10).sum()),
+            "Record >10 Unit Sales": int(record["units"].gt(10).sum()),
             "Record >$1K": int(record["revenue"].gt(1000).sum()),
             "Record >$3K": int(record["revenue"].gt(3000).sum()),
             "Record >$5K": int(record["revenue"].gt(5000).sum()),
@@ -258,9 +274,14 @@ def manager_kpis(master_scope: pd.DataFrame, period_orders: pd.DataFrame, start_
             "New MRnD Revenue": sold_new_mrnd["revenue"].sum(),
             "New Non-MRnD Revenue": sold_new_non_mrnd["revenue"].sum(),
             "Sold Rate": sold_new["asin"].nunique() / denominator if denominator else 0.0,
-            "Total Revenue": group["revenue"].sum(),
+            "Total ASIN Sold": sold_total["asin"].nunique(),
+            "Total MRnD Sold": sold_total_mrnd["asin"].nunique(),
+            "Total Non-MRnD Sold": sold_total_non_mrnd["asin"].nunique(),
+            "Total ASIN Revenue": group["revenue"].sum(),
+            "Total MRnD Revenue": group.loc[group["mrnd"], "revenue"].sum(),
+            "Total Non-MRnD Revenue": group.loc[~group["mrnd"], "revenue"].sum(),
         })
-    return pd.DataFrame(rows, columns=columns).sort_values("Total Revenue", ascending=False)
+    return pd.DataFrame(rows, columns=columns).sort_values("Total ASIN Revenue", ascending=False)
 
 
 def personnel_listing_table(scope: pd.DataFrame, person_column: str) -> pd.DataFrame:

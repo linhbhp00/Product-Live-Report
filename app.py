@@ -10,7 +10,10 @@ import pandas as pd
 import streamlit as st
 
 from charts import double_donut, listing_weekly_chart, sales_weekly_chart
-from report_logic import VN_TZ, clean_master, clean_orders, filter_dates, manager_kpis, personnel_listing_table
+from report_logic import (
+    VN_TZ, clean_master, clean_orders, filter_dates, manager_kpis,
+    new_asin_bounds, personnel_listing_table,
+)
 from storage import (
     append_orders, create_storage, delete_batch, import_history, initialize_database,
     load_master, load_orders, master_import_history, replace_master,
@@ -319,15 +322,41 @@ with st.container(border=True):
 
 st.write("")
 with st.container(border=True):
-    st.markdown('<p class="section-title">KPI theo Manage By / ASIN Manager</p><p class="section-sub">Aggregate ASIN → Record ID trước khi áp ngưỡng. New dựa trên Custom Check Done trong khoảng đang xem.</p>', unsafe_allow_html=True)
+    new_start, new_end_exclusive = new_asin_bounds(end_date)
+    new_end = new_end_exclusive - pd.Timedelta(days=1)
+    st.markdown(
+        '<p class="section-title">KPI theo Manage By / ASIN Manager</p>'
+        f'<p class="section-sub">Record &gt;10 dùng tổng Unit Sales theo Record ID. '
+        f'New ASIN window: {new_start.strftime("%d/%m/%Y")}–{new_end.strftime("%d/%m/%Y")}.</p>',
+        unsafe_allow_html=True,
+    )
     manager_table = manager_kpis(master_scope, period_orders, start_date, end_date)
-    st.dataframe(manager_table, width="stretch", hide_index=True, column_config={
-        "New ASIN Revenue": st.column_config.NumberColumn(format="USD %.2f"),
-        "New MRnD Revenue": st.column_config.NumberColumn(format="USD %.2f"),
-        "New Non-MRnD Revenue": st.column_config.NumberColumn(format="USD %.2f"),
-        "Sold Rate": st.column_config.NumberColumn(format="%.1%%"),
-        "Total Revenue": st.column_config.NumberColumn(format="USD %.2f"),
-    })
+    revenue_columns = [
+        "New ASIN Revenue", "New MRnD Revenue", "New Non-MRnD Revenue",
+        "Total ASIN Revenue", "Total MRnD Revenue", "Total Non-MRnD Revenue",
+    ]
+    new_columns = [
+        "New ASIN Sold", "New MRnD Sold", "New Non-MRnD Sold",
+        "New ASIN Revenue", "New MRnD Revenue", "New Non-MRnD Revenue", "Sold Rate",
+    ]
+    total_columns = [
+        "Total ASIN Sold", "Total MRnD Sold", "Total Non-MRnD Sold",
+        "Total ASIN Revenue", "Total MRnD Revenue", "Total Non-MRnD Revenue",
+    ]
+    manager_display = manager_table.copy()
+    for column in revenue_columns:
+        manager_display[column] = manager_display[column].map(lambda value: f"$ {float(value):,.2f}")
+    manager_display["Sold Rate"] = manager_display["Sold Rate"].map(lambda value: f"{float(value):.1%}")
+
+    def manager_group_colors(frame: pd.DataFrame) -> pd.DataFrame:
+        styles = pd.DataFrame("", index=frame.index, columns=frame.columns)
+        styles.loc[:, new_columns] = "background-color: #fff0dc"
+        styles.loc[:, total_columns] = "background-color: #e7f1f8"
+        return styles
+
+    manager_styler = manager_display.style.apply(manager_group_colors, axis=None)
+    st.dataframe(manager_styler, width="stretch", hide_index=True)
+    st.caption("Cam nhạt = nhóm New · Xanh nhạt = nhóm Total · Revenue = Item Price + Shipping.")
 
 st.markdown('<div class="hero"><h1>Listings Performance</h1><p>Phân tích Product Master theo Custom Check Done, độc lập với Order Date.</p></div>', unsafe_allow_html=True)
 valid_custom = master.dropna(subset=["custom_check_done"]).copy()
