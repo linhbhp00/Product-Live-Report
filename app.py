@@ -12,12 +12,13 @@ import streamlit as st
 from charts import double_donut, listing_weekly_chart, sales_weekly_chart
 from report_logic import VN_TZ, clean_master, clean_orders, filter_dates, manager_kpis, personnel_listing_table
 from storage import (
-    append_orders, create_storage, delete_batch, import_history, load_master, load_orders,
-    master_import_history, replace_master,
+    append_orders, create_storage, delete_batch, import_history, initialize_database,
+    load_master, load_orders, master_import_history, replace_master,
 )
 
 st.set_page_config(page_title="Product Live Report", page_icon="📈", layout="wide")
 ROOT = Path(__file__).parent
+STORAGE_SCHEMA_VERSION = 2
 
 
 def secrets(name: str) -> dict:
@@ -48,7 +49,9 @@ def db_url() -> str:
 
 
 @st.cache_resource
-def get_storage(url: str):
+def get_storage(url: str, schema_version: int):
+    # schema_version is intentionally part of the cache key. Increment it when
+    # a deployment adds tables so Streamlit cannot reuse a pre-migration engine.
     return create_storage(url, ROOT)
 
 
@@ -138,7 +141,10 @@ div[data-testid="stVerticalBlockBorderWrapper"]{border:1px solid var(--line);bor
 """, unsafe_allow_html=True)
 
 is_admin = admin_login()
-engine, remote_storage = get_storage(db_url())
+engine, remote_storage = get_storage(db_url(), STORAGE_SCHEMA_VERSION)
+# Cached resources can survive a hot reload. CREATE IF NOT EXISTS is cheap and
+# guarantees that every rerun sees the current schema.
+initialize_database(engine)
 master = load_master(engine)
 master_source = f"Product Master đã khóa · {len(master):,} ASIN" if not master.empty else "Chưa import Product Master"
 orders = load_orders(engine)

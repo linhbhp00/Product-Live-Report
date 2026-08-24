@@ -194,7 +194,10 @@ def master_import_history(engine: Engine | sqlite3.Connection) -> pd.DataFrame:
         if isinstance(engine, sqlite3.Connection)
         else text("SELECT * FROM product_master_import_history ORDER BY imported_at DESC")
     )
-    result = pd.read_sql(query, engine)
+    try:
+        result = pd.read_sql(query, engine)
+    except Exception:
+        return pd.DataFrame(columns=["Batch ID", "Imported At", "File", "ASINs", "Active", "Locked"])
     if result.empty:
         return result
     result["Imported At"] = pd.to_datetime(result["imported_at"], errors="coerce", utc=True).dt.tz_convert("Asia/Ho_Chi_Minh")
