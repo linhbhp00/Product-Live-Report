@@ -352,6 +352,8 @@ with st.container(border=True):
         styles = pd.DataFrame("", index=frame.index, columns=frame.columns)
         styles.loc[:, new_columns] = "background-color: #fff0dc"
         styles.loc[:, total_columns] = "background-color: #e7f1f8"
+        total_row = frame["ASIN Manager"].eq("TOTAL")
+        styles.loc[total_row, :] = styles.loc[total_row, :] + "; font-weight: 700"
         return styles
 
     manager_styler = manager_display.style.apply(manager_group_colors, axis=None)
@@ -410,13 +412,11 @@ for title, person_column in [("Manage By", "asin_manager"), ("Custom By", "custo
     st.write("")
     with st.container(border=True):
         st.markdown(f'<p class="section-title">{title}</p><p class="section-sub">Trái: Custom Done tuần stacked MRnD/Non-MRnD. Phải: chi tiết nhân sự.</p>', unsafe_allow_html=True)
-        chart_col, table_col = st.columns([1.45, 1], gap="large")
+        chart_col, table_col = st.columns([1.6, .9], gap="large")
         with chart_col:
             listing_weekly_chart(listing_scope, person_column)
         with table_col:
-            st.dataframe(personnel_listing_table(listing_scope, person_column), width="stretch", hide_index=True, column_config={
-                "MRnD Rate": st.column_config.NumberColumn(format="%.1%%")
-            })
+            st.dataframe(personnel_listing_table(listing_scope, person_column), width="stretch", hide_index=True)
 
 with st.expander("Chú thích metric & cấu hình"):
     st.markdown("""
