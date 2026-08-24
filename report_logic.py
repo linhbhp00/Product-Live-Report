@@ -242,8 +242,8 @@ def manager_kpis(master_scope: pd.DataFrame, period_orders: pd.DataFrame, start_
     portfolio["units"] = pd.to_numeric(portfolio["units"], errors="coerce").fillna(0.0)
     new_start, new_end_exclusive = new_asin_bounds(end_date)
     portfolio["is_new"] = portfolio["custom_check_done"].ge(new_start) & portfolio["custom_check_done"].lt(new_end_exclusive)
-    rows = []
-    for manager, group in portfolio.groupby("asin_manager", dropna=False):
+
+    def build_row(label: str, group: pd.DataFrame) -> dict:
         # Several ASINs can share a Record ID. Sum all Qty/Unit Sales for the
         # record before applying the >10 threshold.
         manager_orders = period_orders[period_orders["asin"].isin(set(group["asin"]))].merge(
@@ -260,8 +260,8 @@ def manager_kpis(master_scope: pd.DataFrame, period_orders: pd.DataFrame, start_
         sold_total_mrnd = sold_total[sold_total["mrnd"]]
         sold_total_non_mrnd = sold_total[~sold_total["mrnd"]]
         denominator = new["asin"].nunique()
-        rows.append({
-            "ASIN Manager": manager or "Chưa xác định",
+        return {
+            "ASIN Manager": label,
             "Record >10 Unit Sales": int(record["units"].gt(10).sum()),
             "Record >$1K": int(record["revenue"].gt(1000).sum()),
             "Record >$3K": int(record["revenue"].gt(3000).sum()),
@@ -280,12 +280,21 @@ def manager_kpis(master_scope: pd.DataFrame, period_orders: pd.DataFrame, start_
             "Total ASIN Revenue": group["revenue"].sum(),
             "Total MRnD Revenue": group.loc[group["mrnd"], "revenue"].sum(),
             "Total Non-MRnD Revenue": group.loc[~group["mrnd"], "revenue"].sum(),
-        })
-    return pd.DataFrame(rows, columns=columns).sort_values("Total ASIN Revenue", ascending=False)
+        }
+
+    rows = [
+        build_row(manager or "Chưa xác định", group)
+        for manager, group in portfolio.groupby("asin_manager", dropna=False)
+    ]
+    detail = pd.DataFrame(rows, columns=columns).sort_values("Total ASIN Revenue", ascending=False)
+    # Recalculate the total on the full portfolio so a Record ID shared across
+    # managers is counted once at each threshold.
+    total = pd.DataFrame([build_row("TOTAL", portfolio)], columns=columns)
+    return pd.concat([detail, total], ignore_index=True)
 
 
 def personnel_listing_table(scope: pd.DataFrame, person_column: str) -> pd.DataFrame:
-    columns = ["Nhân sự", "Total Custom Done", "MRnD", "Non-MRnD", "MRnD Rate"]
+    columns = ["Nhân sự", "Total Custom Done", "MRnD", "Non-MRnD"]
     if scope.empty:
         return pd.DataFrame(columns=columns)
     work = scope[["asin", person_column, "mrnd"]].drop_duplicates("asin").copy()
@@ -295,6 +304,5 @@ def personnel_listing_table(scope: pd.DataFrame, person_column: str) -> pd.DataF
     non = work[~work["mrnd"]].groupby(person_column)["asin"].nunique().rename("Non-MRnD")
     result = pd.concat([total, mrnd, non], axis=1).fillna(0).reset_index().rename(columns={person_column: "Nhân sự"})
     result[["Total Custom Done", "MRnD", "Non-MRnD"]] = result[["Total Custom Done", "MRnD", "Non-MRnD"]].astype(int)
-    result["MRnD Rate"] = result["MRnD"].div(result["Total Custom Done"].where(result["Total Custom Done"].ne(0))).fillna(0)
     return result[columns].sort_values("Total Custom Done", ascending=False)
 
