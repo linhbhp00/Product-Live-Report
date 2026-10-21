@@ -11,7 +11,10 @@ import os
 import pandas as pd
 import streamlit as st
 
-from charts import double_donut, listing_weekly_chart, sales_weekly_chart
+from charts import (
+    double_donut, listing_weekly_chart, manager_sales_chart, period_display,
+    sales_weekly_chart,
+)
 from report_logic import (
     VN_TZ, clean_master, clean_orders, filter_dates, manager_kpis,
     new_asin_bounds, personnel_listing_table,
@@ -119,9 +122,11 @@ def period_bounds(year: int, mode: str, quarter: str, month: int) -> tuple[date,
     if mode == "Năm":
         return date(year, 1, 1), date(year, 12, 31)
     if mode == "Quý":
-        quarter_number = int(quarter.removeprefix("Q"))
-        start_month = (quarter_number - 1) * 3 + 1
-        end_month = start_month + 2
+        quarter_months = {
+            "Q1": (1, 3), "Q2": (4, 6), "Q3": (7, 9), "Q4": (10, 12),
+            "Q1 + Q2": (1, 6), "Q3 + Q4": (7, 12),
+        }
+        start_month, end_month = quarter_months[quarter]
         return date(year, start_month, 1), date(year, end_month, calendar.monthrange(year, end_month)[1])
     return date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1])
 
@@ -154,7 +159,7 @@ def quick_time_panel(
     year = st.sidebar.selectbox("Năm", years, key="quick_time_year")
     quarter = st.sidebar.selectbox(
         "Quý",
-        ["Q1", "Q2", "Q3", "Q4"],
+        ["Q1", "Q2", "Q3", "Q4", "Q1 + Q2", "Q3 + Q4"],
         index=(latest_date.month - 1) // 3,
         disabled=mode != "Quý",
         key="quick_time_quarter",
@@ -330,6 +335,7 @@ if "sale_dates" not in st.session_state:
 if "listing_dates" not in st.session_state:
     st.session_state["listing_dates"] = (listing_min, listing_max)
 quick_time_panel(minimum, maximum, listing_min, listing_max)
+time_mode = st.session_state.get("quick_time_mode", "Tháng")
 
 with st.container(border=True):
     st.markdown('<p class="section-title">Bộ lọc Sale Performance</p><p class="section-sub">Date filter áp dụng trên ngày Việt Nam sau timezone conversion.</p>', unsafe_allow_html=True)
@@ -368,8 +374,12 @@ kpi_row([
 
 st.write("")
 with st.container(border=True):
-    st.markdown('<p class="section-title">Sale Performance theo tuần Việt Nam</p><p class="section-sub">Revenue = cột · Orders = đường.</p>', unsafe_allow_html=True)
-    sales_weekly_chart(period_orders)
+    st.markdown(
+        f'<p class="section-title">Sale Performance theo {period_display(time_mode)}</p>'
+        '<p class="section-sub">Revenue = cột · Orders = đường.</p>',
+        unsafe_allow_html=True,
+    )
+    sales_weekly_chart(period_orders, time_mode)
 
 st.write("")
 with st.container(border=True):
@@ -427,16 +437,15 @@ with st.container(border=True):
     ]
     new_columns = [
         "New ASIN Sold", "New MRnD Sold", "New Non-MRnD Sold",
-        "New ASIN Revenue", "New MRnD Revenue", "New Non-MRnD Revenue", "Sold Rate",
+        "New ASIN Revenue", "New MRnD Revenue", "New Non-MRnD Revenue",
     ]
     total_columns = [
         "Total ASIN Sold", "Total MRnD Sold", "Total Non-MRnD Sold",
         "Total ASIN Revenue", "Total MRnD Revenue", "Total Non-MRnD Revenue",
     ]
-    manager_display = manager_table.copy()
+    manager_display = manager_table.drop(columns=["Sold Rate"], errors="ignore").copy()
     for column in revenue_columns:
         manager_display[column] = manager_display[column].map(lambda value: f"$ {float(value):,.2f}")
-    manager_display["Sold Rate"] = manager_display["Sold Rate"].map(lambda value: f"{float(value):.1%}")
 
     def manager_group_colors(frame: pd.DataFrame) -> pd.DataFrame:
         styles = pd.DataFrame("", index=frame.index, columns=frame.columns)
@@ -449,6 +458,15 @@ with st.container(border=True):
     manager_styler = manager_display.style.apply(manager_group_colors, axis=None)
     st.dataframe(manager_styler, width="stretch", hide_index=True)
     st.caption("Cam nhạt = nhóm New · Xanh nhạt = nhóm Total · Revenue = Item Price + Shipping.")
+
+st.write("")
+with st.container(border=True):
+    st.markdown(
+        f'<p class="section-title">Sale Performance theo ASIN Manager · {period_display(time_mode)}</p>'
+        '<p class="section-sub">Revenue stacked theo manager; Orders là đường trên trục phải.</p>',
+        unsafe_allow_html=True,
+    )
+    manager_sales_chart(period_orders, master_scope, time_mode)
 
 st.markdown('<div class="hero"><h1>Listings Performance</h1><p>Phân tích Product Master theo Custom Check Done, độc lập với Order Date.</p></div>', unsafe_allow_html=True)
 
@@ -498,10 +516,15 @@ with st.container(border=True):
 for title, person_column in [("Manage By", "asin_manager"), ("Custom By", "custom_by")]:
     st.write("")
     with st.container(border=True):
-        st.markdown(f'<p class="section-title">{title}</p><p class="section-sub">Trái: Custom Done tuần stacked MRnD/Non-MRnD. Phải: chi tiết nhân sự.</p>', unsafe_allow_html=True)
+        st.markdown(
+            f'<p class="section-title">{title}</p><p class="section-sub">'
+            f'Trái: Custom Done theo {period_display(time_mode).lower()} stacked MRnD/Non-MRnD. '
+            'Phải: chi tiết nhân sự.</p>',
+            unsafe_allow_html=True,
+        )
         chart_col, table_col = st.columns([1.6, .9], gap="large")
         with chart_col:
-            listing_weekly_chart(listing_scope, person_column)
+            listing_weekly_chart(listing_scope, person_column, time_mode)
         with table_col:
             st.dataframe(personnel_listing_table(listing_scope, person_column), width="stretch", hide_index=True)
 
@@ -510,7 +533,6 @@ with st.expander("Chú thích metric & cấu hình"):
 - Timezone Sale: UTC-aware → America/Los_Angeles → Asia/Ho_Chi_Minh; không localize lại timestamp đã có timezone.
 - Tuần Việt Nam: Thứ Hai–Chủ Nhật; bucket hiển thị đủ range kể cả tháng không trọn vẹn.
 - Record KPI: nhiều ASIN chung Record ID được cộng Revenue/Orders trước ngưỡng; các ngưỡng dùng dấu lớn hơn.
-- Sold Rate: ASIN mới có sale / tổng ASIN mới; mới được xác định bằng Custom Check Done thuộc khoảng chọn.
 - Persistence: production cần database.url trong Secrets; local SQLite chỉ là fallback phát triển.
 """)
 

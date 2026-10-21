@@ -4,35 +4,101 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from report_logic import add_week_bucket
+from report_logic import VN_TZ, add_week_bucket
 
 
 ORANGE = "#f59a3d"
 NAVY = "#27445f"
 
 
-def sales_weekly_chart(orders: pd.DataFrame) -> None:
+def period_display(mode: str) -> str:
+    return {"Năm": "Quý + Năm", "Quý": "Tháng + Năm", "Tháng": "Tuần + Tháng"}.get(
+        mode, "Tuần + Tháng"
+    )
+
+
+def add_period_bucket(df: pd.DataFrame, date_column: str, mode: str) -> pd.DataFrame:
+    """Bucket VN timestamps based on the quick range selected by the viewer."""
+    if mode == "Tháng":
+        result = add_week_bucket(df, date_column)
+        return result.rename(columns={"week_start": "period_start", "week_label": "period_label"})
+
+    result = df.copy()
+    local_naive = result[date_column].dt.tz_convert(VN_TZ).dt.tz_localize(None)
+    if mode == "Năm":
+        result["period_start"] = local_naive.dt.to_period("Q").dt.start_time
+        result["period_label"] = "Q" + local_naive.dt.quarter.astype(str) + "/" + local_naive.dt.year.astype(str)
+    else:
+        result["period_start"] = local_naive.dt.to_period("M").dt.start_time
+        result["period_label"] = "Tháng " + local_naive.dt.strftime("%m/%Y")
+    return result
+
+
+def sales_weekly_chart(orders: pd.DataFrame, mode: str = "Tháng") -> None:
     if orders.empty:
         st.info("Không có sale trong khoảng thời gian đã chọn.")
         return
-    work = add_week_bucket(orders, "order_date")
-    weekly = work.groupby(["week_start", "week_label"], as_index=False).agg(
+    work = add_period_bucket(orders, "order_date", mode)
+    weekly = work.groupby(["period_start", "period_label"], as_index=False).agg(
         Revenue=("net_revenue", "sum"), Orders=("order_id", "nunique")
-    ).sort_values("week_start")
-    order = weekly["week_label"].tolist()
-    base = alt.Chart(weekly).encode(x=alt.X("week_label:N", sort=order, title="Tuần Việt Nam"))
+    ).sort_values("period_start")
+    order = weekly["period_label"].tolist()
+    base = alt.Chart(weekly).encode(
+        x=alt.X("period_label:N", sort=order, title=period_display(mode))
+    )
     bars = base.mark_bar(color=ORANGE, cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
         y=alt.Y("Revenue:Q", title="Revenue (USD)", axis=alt.Axis(format=",.0f")),
-        tooltip=["week_label:N", alt.Tooltip("Revenue:Q", format=",.2f"), "Orders:Q"],
+        tooltip=["period_label:N", alt.Tooltip("Revenue:Q", format=",.2f"), "Orders:Q"],
     )
     line = base.mark_line(color=NAVY, point=True, strokeWidth=3).encode(
-        y=alt.Y("Orders:Q", title="Orders", axis=alt.Axis(orient="right")), tooltip=["week_label:N", "Orders:Q"]
+        y=alt.Y("Orders:Q", title="Orders", axis=alt.Axis(orient="right")),
+        tooltip=["period_label:N", "Orders:Q"],
     )
     st.altair_chart(
         (bars + line).resolve_scale(y="independent").properties(height=340),
         use_container_width=True,
     )
-    st.caption("Tuần Thứ Hai-Chủ Nhật theo múi giờ Việt Nam; nhãn là ngày bắt đầu-kết thúc.")
+    if mode == "Tháng":
+        st.caption("Tuần Thứ Hai-Chủ Nhật theo múi giờ Việt Nam; nhãn là ngày bắt đầu-kết thúc.")
+    else:
+        st.caption(f"Dữ liệu theo {period_display(mode).lower()}, dùng ngày Việt Nam sau timezone conversion.")
+
+
+def manager_sales_chart(orders: pd.DataFrame, master_scope: pd.DataFrame, mode: str = "Tháng") -> None:
+    if orders.empty or master_scope.empty:
+        st.info("Không có sale theo ASIN Manager trong khoảng thời gian đã chọn.")
+        return
+    manager_map = master_scope[["asin", "asin_manager"]].drop_duplicates("asin")
+    work = orders.merge(manager_map, on="asin", how="inner")
+    if work.empty:
+        st.info("Không có sale theo ASIN Manager trong khoảng thời gian đã chọn.")
+        return
+    work["ASIN Manager"] = work["asin_manager"].fillna("").astype(str).str.strip().replace("", "Chưa xác định")
+    work = add_period_bucket(work, "order_date", mode)
+    grouped = work.groupby(
+        ["period_start", "period_label", "ASIN Manager"], as_index=False
+    ).agg(Revenue=("net_revenue", "sum"), Orders=("order_id", "nunique"))
+    grouped = grouped.sort_values(["period_start", "ASIN Manager"])
+    order = grouped["period_label"].drop_duplicates().tolist()
+    color = alt.Color("ASIN Manager:N", title="ASIN Manager")
+    bars = alt.Chart(grouped).mark_bar(opacity=.82).encode(
+        x=alt.X("period_label:N", sort=order, title=period_display(mode)),
+        y=alt.Y("Revenue:Q", title="Revenue (USD)", stack="zero", axis=alt.Axis(format=",.0f")),
+        color=color,
+        tooltip=["period_label:N", "ASIN Manager:N", alt.Tooltip("Revenue:Q", format=",.2f"), "Orders:Q"],
+    )
+    lines = alt.Chart(grouped).mark_line(point=True, strokeWidth=2.5).encode(
+        x=alt.X("period_label:N", sort=order),
+        y=alt.Y("Orders:Q", title="Orders", axis=alt.Axis(orient="right")),
+        color=color,
+        detail="ASIN Manager:N",
+        tooltip=["period_label:N", "ASIN Manager:N", "Orders:Q"],
+    )
+    st.altair_chart(
+        (bars + lines).resolve_scale(y="independent").properties(height=360),
+        use_container_width=True,
+    )
+    st.caption("Revenue = cột stacked theo ASIN Manager · Orders = đường theo ASIN Manager.")
 
 
 def double_donut(
@@ -103,34 +169,37 @@ def double_donut(
     )
 
 
-def listing_weekly_chart(scope: pd.DataFrame, person_column: str) -> None:
+def listing_weekly_chart(scope: pd.DataFrame, person_column: str, mode: str = "Tháng") -> None:
     work = scope[scope[person_column].fillna("").astype(str).str.strip().ne("")].copy()
     if work.empty:
         st.info("Không có dữ liệu nhân sự trong bộ lọc hiện tại.")
         return
-    work = add_week_bucket(work, "custom_check_done")
+    work = add_period_bucket(work, "custom_check_done", mode)
     work["MRnD Status"] = work["mrnd"].map({True: "MRnD", False: "Non-MRnD"})
-    weekly = work.groupby(["week_start", "week_label", "MRnD Status"], as_index=False)["asin"].nunique().rename(columns={"asin": "Custom Done"}).sort_values("week_start")
+    weekly = work.groupby(["period_start", "period_label", "MRnD Status"], as_index=False)["asin"].nunique().rename(columns={"asin": "Custom Done"}).sort_values("period_start")
     weekly["Status Order"] = weekly["MRnD Status"].map({"Non-MRnD": 0, "MRnD": 1})
-    weekly = weekly.sort_values(["week_start", "Status Order"])
-    weekly["Stack Start"] = weekly.groupby("week_label")["Custom Done"].cumsum() - weekly["Custom Done"]
+    weekly = weekly.sort_values(["period_start", "Status Order"])
+    weekly["Stack Start"] = weekly.groupby("period_label")["Custom Done"].cumsum() - weekly["Custom Done"]
     weekly["Label Position"] = weekly["Stack Start"] + weekly["Custom Done"] / 2
-    order = weekly["week_label"].drop_duplicates().tolist()
+    order = weekly["period_label"].drop_duplicates().tolist()
     chart = alt.Chart(weekly).mark_bar().encode(
-        x=alt.X("week_label:N", sort=order, title="Tuần Việt Nam"),
+        x=alt.X("period_label:N", sort=order, title=period_display(mode)),
         y=alt.Y("Custom Done:Q", title="Count Custom Done", stack="zero"),
         color=alt.Color("MRnD Status:N", scale=alt.Scale(domain=["MRnD", "Non-MRnD"], range=[ORANGE, NAVY])),
         order=alt.Order("Status Order:Q", sort="ascending"),
-        tooltip=["week_label:N", "MRnD Status:N", "Custom Done:Q"],
+        tooltip=["period_label:N", "MRnD Status:N", "Custom Done:Q"],
     )
     labels = alt.Chart(weekly).mark_text(
         color="white", fontWeight="bold", fontSize=12, baseline="middle"
     ).encode(
-        x=alt.X("week_label:N", sort=order),
+        x=alt.X("period_label:N", sort=order),
         y=alt.Y("Label Position:Q"),
         text=alt.Text("Custom Done:Q", format=".0f"),
-        tooltip=["week_label:N", "MRnD Status:N", "Custom Done:Q"],
+        tooltip=["period_label:N", "MRnD Status:N", "Custom Done:Q"],
     )
     st.altair_chart((chart + labels).properties(height=330), use_container_width=True)
-    st.caption("Đếm unique ASIN có Custom Check Done; tuần Thứ Hai-Chủ Nhật theo giờ Việt Nam.")
+    if mode == "Tháng":
+        st.caption("Đếm unique ASIN có Custom Check Done; tuần Thứ Hai-Chủ Nhật theo giờ Việt Nam.")
+    else:
+        st.caption(f"Đếm unique ASIN có Custom Check Done theo {period_display(mode).lower()}.")
 
