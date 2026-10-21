@@ -463,7 +463,7 @@ st.write("")
 with st.container(border=True):
     st.markdown(
         f'<p class="section-title">Sale Performance theo ASIN Manager · {period_display(time_mode)}</p>'
-        '<p class="section-sub">Revenue stacked theo manager; Orders là đường trên trục phải.</p>',
+        '<p class="section-sub">Trục X là ASIN Manager; Revenue là cột ghép theo kỳ và Orders là đường trên trục phải.</p>',
         unsafe_allow_html=True,
     )
     manager_sales_chart(period_orders, master_scope, time_mode)

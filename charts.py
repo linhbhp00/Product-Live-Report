@@ -79,26 +79,48 @@ def manager_sales_chart(orders: pd.DataFrame, master_scope: pd.DataFrame, mode: 
         ["period_start", "period_label", "ASIN Manager"], as_index=False
     ).agg(Revenue=("net_revenue", "sum"), Orders=("order_id", "nunique"))
     grouped = grouped.sort_values(["period_start", "ASIN Manager"])
-    order = grouped["period_label"].drop_duplicates().tolist()
-    color = alt.Color("ASIN Manager:N", title="ASIN Manager")
+    period_order = grouped["period_label"].drop_duplicates().tolist()
+    manager_order = (
+        grouped.groupby("ASIN Manager", as_index=False)["Revenue"]
+        .sum()
+        .sort_values("Revenue", ascending=False)["ASIN Manager"]
+        .tolist()
+    )
+    color = alt.Color(
+        "period_label:N",
+        sort=period_order,
+        title=period_display(mode),
+    )
+    x = alt.X(
+        "ASIN Manager:N",
+        sort=manager_order,
+        title="ASIN Manager",
+        axis=alt.Axis(labelAngle=-25, labelLimit=180),
+    )
+    offset = alt.XOffset("period_label:N", sort=period_order, title=period_display(mode))
     bars = alt.Chart(grouped).mark_bar(opacity=.82).encode(
-        x=alt.X("period_label:N", sort=order, title=period_display(mode)),
-        y=alt.Y("Revenue:Q", title="Revenue (USD)", stack="zero", axis=alt.Axis(format=",.0f")),
+        x=x,
+        xOffset=offset,
+        y=alt.Y("Revenue:Q", title="Revenue (USD)", axis=alt.Axis(format=",.0f")),
         color=color,
         tooltip=["period_label:N", "ASIN Manager:N", alt.Tooltip("Revenue:Q", format=",.2f"), "Orders:Q"],
     )
     lines = alt.Chart(grouped).mark_line(point=True, strokeWidth=2.5).encode(
-        x=alt.X("period_label:N", sort=order),
+        x=x,
+        xOffset=offset,
         y=alt.Y("Orders:Q", title="Orders", axis=alt.Axis(orient="right")),
         color=color,
-        detail="ASIN Manager:N",
+        detail="period_label:N",
         tooltip=["period_label:N", "ASIN Manager:N", "Orders:Q"],
     )
     st.altair_chart(
         (bars + lines).resolve_scale(y="independent").properties(height=360),
         use_container_width=True,
     )
-    st.caption("Revenue = cột stacked theo ASIN Manager · Orders = đường theo ASIN Manager.")
+    st.caption(
+        f"Trục X = ASIN Manager · cột ghép theo {period_display(mode).lower()} = Revenue "
+        "· đường cùng màu = Orders. Nhân sự được xếp theo tổng Revenue giảm dần."
+    )
 
 
 def double_donut(
