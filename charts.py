@@ -87,17 +87,17 @@ def manager_sales_chart(orders: pd.DataFrame, master_scope: pd.DataFrame, mode: 
         .tolist()
     )
     color = alt.Color(
-        "period_label:N",
-        sort=period_order,
-        title=period_display(mode),
-    )
-    x = alt.X(
         "ASIN Manager:N",
         sort=manager_order,
         title="ASIN Manager",
-        axis=alt.Axis(labelAngle=-25, labelLimit=180),
     )
-    offset = alt.XOffset("period_label:N", sort=period_order, title=period_display(mode))
+    x = alt.X(
+        "period_label:N",
+        sort=period_order,
+        title=period_display(mode),
+        axis=alt.Axis(labelAngle=-35, labelLimit=180),
+    )
+    offset = alt.XOffset("ASIN Manager:N", sort=manager_order, title="ASIN Manager")
     bars = alt.Chart(grouped).mark_bar(opacity=.82).encode(
         x=x,
         xOffset=offset,
@@ -110,7 +110,7 @@ def manager_sales_chart(orders: pd.DataFrame, master_scope: pd.DataFrame, mode: 
         xOffset=offset,
         y=alt.Y("Orders:Q", title="Orders", axis=alt.Axis(orient="right")),
         color=color,
-        detail="period_label:N",
+        detail="ASIN Manager:N",
         tooltip=["period_label:N", "ASIN Manager:N", "Orders:Q"],
     )
     st.altair_chart(
@@ -118,8 +118,8 @@ def manager_sales_chart(orders: pd.DataFrame, master_scope: pd.DataFrame, mode: 
         use_container_width=True,
     )
     st.caption(
-        f"Trục X = ASIN Manager · cột ghép theo {period_display(mode).lower()} = Revenue "
-        "· đường cùng màu = Orders. Nhân sự được xếp theo tổng Revenue giảm dần."
+        f"Trục X = {period_display(mode)} · trong mỗi kỳ, Revenue là các cột ghép theo ASIN Manager "
+        "· đường cùng màu = Orders. Màu nhân sự được giữ nhất quán giữa các kỳ."
     )
 
 
