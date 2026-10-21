@@ -12,9 +12,11 @@ import pandas as pd
 try:
     from sqlalchemy import create_engine, text
     from sqlalchemy.engine import Engine
+    from sqlalchemy.pool import NullPool
 except ImportError:  # Local smoke tests may run before requirements are installed.
     create_engine = None
     text = None
+    NullPool = None
     Engine = Any
 
 
@@ -40,7 +42,14 @@ def create_storage(database_url: str, root: Path) -> tuple[Engine | sqlite3.Conn
     else:
         if create_engine is None:
             raise RuntimeError("Thiếu SQLAlchemy. Hãy cài requirements.txt để dùng database production.")
-        engine = create_engine(database_url, pool_pre_ping=True)
+        # Streamlit instances are short-lived and may scale horizontally. Avoid
+        # retaining idle Supabase pooler connections between reruns/replicas.
+        engine = create_engine(
+            database_url,
+            pool_pre_ping=True,
+            poolclass=NullPool,
+            connect_args={"connect_timeout": 10},
+        )
     initialize_database(engine)
     return engine, remote
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from datetime import date
+import calendar
 import hashlib
 import hmac
 import os
@@ -112,6 +114,69 @@ def date_pair(value):
     return value if isinstance(value, (tuple, list)) and len(value) == 2 else (value, value)
 
 
+def period_bounds(year: int, mode: str, quarter: str, month: int) -> tuple[date, date]:
+    """Return an inclusive calendar range for the Vietnam reporting calendar."""
+    if mode == "Năm":
+        return date(year, 1, 1), date(year, 12, 31)
+    if mode == "Quý":
+        quarter_number = int(quarter.removeprefix("Q"))
+        start_month = (quarter_number - 1) * 3 + 1
+        end_month = start_month + 2
+        return date(year, start_month, 1), date(year, end_month, calendar.monthrange(year, end_month)[1])
+    return date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1])
+
+
+def quick_time_panel(
+    sale_min: date,
+    sale_max: date,
+    listing_min: date,
+    listing_max: date,
+) -> None:
+    """Sidebar shortcut that writes to the existing Sale/Listings date widgets."""
+    latest_date = max(sale_max, listing_max)
+    earliest_year = min(sale_min.year, listing_min.year, latest_date.year)
+    years = list(range(latest_date.year, earliest_year - 1, -1))
+
+    st.sidebar.divider()
+    st.sidebar.markdown("### Chọn nhanh thời gian")
+    st.sidebar.caption("Theo lịch Việt Nam · đồng bộ với bộ lọc ngày trong báo cáo")
+    target = st.sidebar.selectbox(
+        "Áp dụng cho",
+        ["Cả hai", "Sale Performance", "Listings Performance"],
+        key="quick_time_target",
+    )
+    mode = st.sidebar.segmented_control(
+        "Kiểu thời gian",
+        ["Năm", "Quý", "Tháng"],
+        default="Tháng",
+        key="quick_time_mode",
+    ) or "Tháng"
+    year = st.sidebar.selectbox("Năm", years, key="quick_time_year")
+    quarter = st.sidebar.selectbox(
+        "Quý",
+        ["Q1", "Q2", "Q3", "Q4"],
+        index=(latest_date.month - 1) // 3,
+        disabled=mode != "Quý",
+        key="quick_time_quarter",
+    )
+    month = st.sidebar.selectbox(
+        "Tháng",
+        list(range(1, 13)),
+        index=latest_date.month - 1,
+        format_func=lambda value: f"Tháng {value:02d}",
+        disabled=mode != "Tháng",
+        key="quick_time_month",
+    )
+    start, end = period_bounds(year, mode, quarter, month)
+    st.sidebar.caption(f"Sẽ chọn: {start.strftime('%d/%m/%Y')}–{end.strftime('%d/%m/%Y')}")
+    if st.sidebar.button("Áp dụng thời gian", type="primary", width="stretch"):
+        if target in {"Cả hai", "Sale Performance"}:
+            st.session_state["sale_dates"] = (start, end)
+        if target in {"Cả hai", "Listings Performance"}:
+            st.session_state["listing_dates"] = (start, end)
+        st.rerun()
+
+
 def money(value: float) -> str:
     return "USD " + f"{value:,.2f}"
 
@@ -144,10 +209,26 @@ div[data-testid="stVerticalBlockBorderWrapper"]{border:1px solid var(--line);bor
 """, unsafe_allow_html=True)
 
 is_admin = admin_login()
-engine, remote_storage = get_storage(db_url(), STORAGE_SCHEMA_VERSION)
-# Cached resources can survive a hot reload. CREATE IF NOT EXISTS is cheap and
-# guarantees that every rerun sees the current schema.
-initialize_database(engine)
+try:
+    engine, remote_storage = get_storage(db_url(), STORAGE_SCHEMA_VERSION)
+    # Cached resources can survive a hot reload. CREATE IF NOT EXISTS is cheap
+    # and guarantees that every rerun sees the current schema.
+    initialize_database(engine)
+except Exception:
+    st.markdown(
+        '<div class="appbar"><div class="brand">📈 Product Live Report</div>'
+        '<div class="sync"><b>●</b>&nbsp; Database offline</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.error("Không thể kết nối kho dữ liệu Supabase. Báo cáo tạm thời chưa tải được.")
+    st.info(
+        "Hãy kiểm tra trạng thái project Supabase. Nếu project đang Paused/Restarting, "
+        "hãy Resume hoặc chờ project trở lại Healthy rồi thử lại. Dữ liệu đã import không bị ghi đè."
+    )
+    if st.button("Thử kết nối lại", type="primary"):
+        get_storage.clear()
+        st.rerun()
+    st.stop()
 master = load_master(engine)
 master_source = f"Product Master đã khóa · {len(master):,} ASIN" if not master.empty else "Chưa import Product Master"
 orders = load_orders(engine)
@@ -240,6 +321,15 @@ mapped_orders = orders[orders["mapped"]].copy() if not orders.empty else orders.
 today = pd.Timestamp.now(tz=VN_TZ).date()
 minimum = mapped_orders["order_date"].min().date() if not mapped_orders.empty else today
 maximum = mapped_orders["order_date"].max().date() if not mapped_orders.empty else today
+valid_custom = master.dropna(subset=["custom_check_done"]).copy()
+listing_min = valid_custom["custom_check_done"].min().date() if not valid_custom.empty else today
+listing_max = valid_custom["custom_check_done"].max().date() if not valid_custom.empty else today
+
+if "sale_dates" not in st.session_state:
+    st.session_state["sale_dates"] = (minimum, maximum)
+if "listing_dates" not in st.session_state:
+    st.session_state["listing_dates"] = (listing_min, listing_max)
+quick_time_panel(minimum, maximum, listing_min, listing_max)
 
 with st.container(border=True):
     st.markdown('<p class="section-title">Bộ lọc Sale Performance</p><p class="section-sub">Date filter áp dụng trên ngày Việt Nam sau timezone conversion.</p>', unsafe_allow_html=True)
@@ -247,7 +337,7 @@ with st.container(border=True):
     with f1:
         query = st.text_input("Tìm kiếm", placeholder="SKU, ASIN hoặc Product Name", key="sale_query")
     with f2:
-        date_range = st.date_input("Khoảng thời gian", value=(minimum, maximum), key="sale_dates")
+        date_range = st.date_input("Khoảng thời gian", key="sale_dates")
     with f3:
         selected_types = st.multiselect("Product Type", sorted(x for x in master["product_type"].unique() if x), key="sale_types")
     with f4:
@@ -361,15 +451,12 @@ with st.container(border=True):
     st.caption("Cam nhạt = nhóm New · Xanh nhạt = nhóm Total · Revenue = Item Price + Shipping.")
 
 st.markdown('<div class="hero"><h1>Listings Performance</h1><p>Phân tích Product Master theo Custom Check Done, độc lập với Order Date.</p></div>', unsafe_allow_html=True)
-valid_custom = master.dropna(subset=["custom_check_done"]).copy()
-listing_min = valid_custom["custom_check_done"].min().date() if not valid_custom.empty else today
-listing_max = valid_custom["custom_check_done"].max().date() if not valid_custom.empty else today
 
 with st.container(border=True):
     st.markdown('<p class="section-title">Bộ lọc Listings Performance</p><p class="section-sub">Mọi KPI/chart dưới đây dùng Custom Check Done làm trường thời gian chính.</p>', unsafe_allow_html=True)
     l1, l2, l3, l4, l5 = st.columns([1.2, 1, 1, .9, .75])
     with l1:
-        listing_dates = st.date_input("Custom Check Done", value=(listing_min, listing_max), key="listing_dates")
+        listing_dates = st.date_input("Custom Check Done", key="listing_dates")
     with l2:
         listing_managers = st.multiselect("Manage By", sorted(x for x in master["asin_manager"].unique() if x), key="listing_managers")
     with l3:
